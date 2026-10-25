@@ -68,6 +68,8 @@ GPIO 配置上方固定显示“设备当前状态”，区分设备确认的模
 
 任务保存在 SQLite，默认目录为 `$XDG_DATA_HOME/limivia-server`，未设置时使用 `~/.local/share/limivia-server`，保留最近 30 天、最多 10,000 条已结束记录。服务重启将未确认任务标记为未知，不自动连接或申请控制；已知 job 可在同设备同 boot 下显式查询，新 boot 的旧句柄不可复用。
 
+后台状态同步按最近一次成功的完整分页耗时调整等待预算，避免 BLE 多页读取超过 3 秒时反复误报引脚未知。前台操作期间暂停新增后台观察查询；写操作先等待已有快照读完，全局停止保留独立入口。真实读取失败或连接中断仍标记待核实，操作结果未知时必须先查询设备，不能直接重发。
+
 ```bash
 poetry run limivia-server serve --data-dir ./data-bin/workbench --job-timeout 300
 ```

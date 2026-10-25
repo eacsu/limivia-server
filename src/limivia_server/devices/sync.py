@@ -17,10 +17,12 @@ class StateSync:
         self.failures = {}
         self.versions = {}
         self.grace = 3.0
+        self.snapshot_duration = 0.0
 
     def reset(self):
         self.snapshot_scope = None
         self.snapshot_failed_at = None
+        self.snapshot_duration = 0.0
         self.reads.clear()
         self.failures.clear()
         self.versions.clear()
@@ -62,9 +64,10 @@ class StateSync:
         task = self.snapshot_task
         started = time.monotonic()
         try:
-            # 保鲜宽限只限制后台观察等待；初始化和业务操作等待完整分页结果。
+            # BLE 多页快照可能超过读数宽限；用已确认查询耗时预留下一次完整分页的预算。
+            budget = max(self.grace, self.snapshot_duration * 2 + self.grace)
             return await asyncio.wait_for(
-                asyncio.shield(task), self.grace if wait_timeout is None else wait_timeout
+                asyncio.shield(task), budget if wait_timeout is None else wait_timeout
             )
         except TimeoutError as exc:
             if scope == (service.generation, service.business):
@@ -74,6 +77,7 @@ class StateSync:
 
     async def _snapshot(self, driver, generation):
         service = self.service
+        started = time.monotonic()
         try:
             while True:
                 version = self.structure_version
@@ -87,6 +91,7 @@ class StateSync:
                 if version == self.structure_version:
                     break
             service._apply_snapshot(snapshot)
+            self.snapshot_duration = time.monotonic() - started
             self.snapshot_failed_at = None
             service.state["snapshot_sync"] = {
                 "state": "current",

@@ -1,5 +1,15 @@
 # 工作台验证记录
 
+## 2026-10-25：Windows 实机 BLE 状态同步与 D5 呼吸灯
+
+分支 `fix/ble-pin-state-breathe`，项目 `.venv` 使用 SDK `0.3.0a3` / JSON-RPC v3。通过 Windows Edge 无头浏览器访问同源 `http://127.0.0.1:8000`，扫描到 `LIMIVIA-BDD6`（BLE 地址 `E4:B0:63:CA:BD:D6`），握手确认设备 ID `e4:b0:63:ca:bd:d4`、板型 `luatos-esp32c3-usb`、profile `bus`、firmware `0.3.0-dev`、boot `5ce6d483a20986eb`。
+
+实测能力发现 28 页约 34 秒，初始状态 6 页约 8–9 秒；固定 3 秒后台等待上限会把正常分页误判为失效。改为依据最近成功完整分页耗时预留等待预算，连接代次改变时重置。前台任务期间暂停新增后台查询，普通写操作先收完在途快照，全局停止继续走独立入口。连接结束时保留 SDK 的具体错误，避免被通用身份验证提示覆盖。
+
+修复前，创建 PWM 曾因 `heartbeat_failed` 返回结果未知。重连查到 GPIO13 PWM 已经创建且 ready，因此没有重发创建；只在确认设备唯一资源就是本轮 D5 PWM 后，显式停止旧实验，再从页面创建新实验。最终完整链路通过：BLE 扫描、握手、发现、快照、停止旧资源、预检、创建 PWM、只读状态查询、连续 24 秒观察与页面刷新恢复。最终资源 ID/instance 为 `6/6`，GPIO13，PWM 1000Hz、10bit、峰值占空比 50%、`breath_ms=2000`，状态 ready，`enabled=true`，driver/cleanup/errors 为 0。观察期间 12 次采样均 ready、stale=false、snapshot_sync=current；刷新后仍显示“呼吸运行中”。测试结束保留后端和呼吸灯运行。以上为设备协议确认与浏览器验收，没有光学或示波器物理测量。
+
+后端 154 项测试、Ruff、前端 31 项单测、ESLint、生产构建通过。完整 Playwright 回归首轮 122/123 通过，苍渊 320px GPIO 几何检查出现一次 98px 变化，单独复跑通过；不将首次失败隐藏为全量一次通过。最终代码上的 LED 专项 12 项全部通过。新增回归覆盖慢分页等待预算及前台写入与后台快照协调。实机脚本、截图与结构化结果位于 Git 忽略的 `artifacts/ble-breathing-final.cjs`、`artifacts/ble-breathing.png`、`artifacts/ble-breathing-result.json`。
+
 ## 2026-10-25：SDK a2、逐引脚状态与稳定 GPIO 控制
 
 分支 `feat/sdk-a2-board-status`，隔离工作区 `/tmp/limivia-server-a2-verify`。手动安装 `limivia-0.3.0a2-py3-none-any.whl`，SHA256 `cd6eb31703a6e63267dd2f865f3f7f33b4ccd970a5969e011b855a75b76653ed`；doctor 确认导入隔离 .venv、版本与 v3 契约，pip check 无冲突。正式 .venv 与正在运行的 a1 实例在验证期间保持原状。

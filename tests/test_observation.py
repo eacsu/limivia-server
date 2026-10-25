@@ -433,3 +433,72 @@ def test_stop_waits_for_slow_readback_without_reporting_unknown(observation_api,
         assert result["result"]["cleanup_faults"] == 0
 
     client.portal.call(exercise)
+
+
+def test_background_snapshot_adapts_to_confirmed_pagination_latency(observation_api, monkeypatch):
+    import asyncio
+
+    client, _, service, _ = observation_api
+    connect(client)
+    original = service.connection.state.snapshot
+    service.sync.grace = 0.01
+
+    async def slow():
+        await asyncio.sleep(0.04)
+        return await original()
+
+    monkeypatch.setattr(service.connection.state, "snapshot", slow)
+
+    async def exercise():
+        # 初始化允许完整分页；后台读取应接受同样的真实传输延迟。
+        await service.sync.snapshot(wait_timeout=1)
+        query = asyncio.create_task(service.sync.snapshot())
+        await asyncio.sleep(0.025)
+        assert not query.done()
+        assert not service.state["stale"]
+        assert service.state["snapshot_sync"]["state"] == "current"
+        await query
+        assert not service.state["stale"]
+        service.sync.reset()
+        assert service.sync.snapshot_duration == 0
+
+    client.portal.call(exercise)
+
+
+def test_foreground_open_waits_for_inflight_snapshot_and_defers_background_refresh(
+    observation_api, monkeypatch
+):
+    import asyncio
+
+    client, backend, service, _ = observation_api
+    connect(client)
+    original = service.connection.state.snapshot
+
+    async def exercise():
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def slow():
+            started.set()
+            await release.wait()
+            return await original()
+
+        monkeypatch.setattr(service.connection.state, "snapshot", slow)
+        query = asyncio.create_task(service.sync.snapshot())
+        await started.wait()
+        before = len(backend.connection.commands)
+        task = await service.submit(
+            "resource.open",
+            {"kind": "pwm", "pins": {"pin": 13}, "config": {"frequency": 1000, "duty": 50}},
+            internal=True,
+        )
+        await asyncio.sleep(0.02)
+        assert service.foreground_pending()
+        service.schedule_refresh()
+        assert not service.refreshing or service.refreshing.done()
+        assert not any(c["op"] == "resource.open" for c in backend.connection.commands[before:])
+        release.set()
+        await query
+        assert (await service.wait(task["id"]))["status"] == "completed"
+        assert not service.foreground_pending()
+
+    client.portal.call(exercise)

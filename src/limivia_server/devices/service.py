@@ -355,9 +355,10 @@ class DeviceService:
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 — 生命周期边界记录失败，不泄露设备原始凭据。
-            self.state["error"] = (
-                "连接或身份验证失败，请检查目标、协议契约、传输配置和服务主机权限。"
-            )
+            if not self.state["error"]:
+                self.state["error"] = (
+                    "连接或身份验证失败，请检查目标、协议契约、传输配置和服务主机权限。"
+                )
         finally:
             if generation == self.generation:
                 self.connection = None
@@ -519,6 +520,14 @@ class DeviceService:
         else:
             self.resource_values.pop(key, None)
 
+    def foreground_pending(self):
+        return any(
+            task["generation"] == self.generation
+            and task["status"] not in TERMINAL
+            and task["op"] not in {"discover", "state.snapshot"}
+            for task in self.tasks.values()
+        )
+
     async def _monitor(self):
         while True:
             self.monitor_wake.clear()
@@ -527,12 +536,18 @@ class DeviceService:
                 and self.business
                 and not self.ending
                 and self.state["status"] == "ready"
+                and not self.foreground_pending()
             ):
                 driver, generation = self.business, self.generation
                 try:
                     snapshot = await self.sync.snapshot()
                     for resource in snapshot.get("resources", []):
-                        if not self.monitor_requests or driver is not self.business or self.ending:
+                        if (
+                            not self.monitor_requests
+                            or driver is not self.business
+                            or self.ending
+                            or self.foreground_pending()
+                        ):
                             break
                         if resource["kind"] == "gpio" and resource["state"] == "ready":
                             try:
@@ -577,6 +592,16 @@ class DeviceService:
         try:
             if generation != self.generation or not driver or self.ending:
                 raise ValueError("连接已改变或正在结束。")
+            snapshot = self.sync.snapshot_task
+            if (
+                op not in OBSERVE | {"discover", "state.snapshot", "outputs.stop"}
+                and snapshot
+                and not snapshot.done()
+            ):
+                # 先收完已在途的多页查询，避免后台观察挤占 BLE 的作业与心跳带宽。
+                await asyncio.wait_for(asyncio.shield(snapshot), self.job_timeout)
+                if generation != self.generation or driver is not self.business or self.ending:
+                    raise ValueError("连接已改变或正在结束。")
             if epoch != self.operation_epoch and op not in OBSERVE | {"outputs.stop"}:
                 raise ValueError("设备已停止或连接已改变，未执行旧动作。")
             if not internal:
@@ -968,6 +993,8 @@ class DeviceService:
                 self.save(old)
 
     def schedule_refresh(self):
+        if self.foreground_pending():
+            return
         if self.refreshing and not self.refreshing.done():
             return
         self.refreshing = self.spawn(self._refresh())
