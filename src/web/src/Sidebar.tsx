@@ -128,7 +128,7 @@ export function Sidebar({
                       .map((resource) => (
                         <button
                           key={`${resource.id}:${resource.instance}`}
-                          className={`context-resource ${selection?.type === 'resource' && selection.id === resource.id && selection.instance === resource.instance ? 'selected' : ''}`}
+                          className={`context-resource ${(selection?.type === 'resource' && selection.id === resource.id && selection.instance === resource.instance) || (selection?.type === 'experiment' && !!(resource.pin_mask & (2 ** selection.gpio))) ? 'selected' : ''}`}
                           onClick={() =>
                             onSelect({
                               type: 'resource',
@@ -150,8 +150,8 @@ export function Sidebar({
                             未归组 ·{' '}
                             {resource.state !== 'ready'
                               ? resource.state
-                              : state.resource_owners[resource.id]
-                                ? '本页面创建'
+                              : state.resource_origin[resource.id] === 'managed'
+                                ? '本连接创建'
                                 : '其他来源'}
                           </small>
                         </button>

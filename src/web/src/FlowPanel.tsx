@@ -591,11 +591,7 @@ export function FlowPanel({ state, enabled }: { state: DeviceState; enabled: boo
               type="checkbox"
               checked={definition.autostart}
               onChange={(e) => {
-                if (
-                  !e.target.checked ||
-                  confirm('启用设备开机自动启动？全局停止仍会持久抑制自启。')
-                )
-                  update({ autostart: e.target.checked })
+                update({ autostart: e.target.checked })
               }}
             />
             自动启动（默认关闭）
@@ -638,8 +634,6 @@ export function FlowPanel({ state, enabled }: { state: DeviceState; enabled: boo
             key={action}
             disabled={!flowId || (!enabled && action !== 'get')}
             run={async () => {
-              if (action === 'remove' && !confirm('只移除已清理的流程加载项？定义文件将保留。'))
-                return
               const task = await api.run('flow.' + action, { flow_id: Number(flowId) })
               setResult(task.result)
             }}

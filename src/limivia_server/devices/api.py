@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import suppress
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -11,7 +12,13 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .service import DeviceService
 from .transfers import download_file, start_upload, validate_flow
-from .wiring import GroupOperation, WiringPlan, start_group_operation
+from .wiring import (
+    GroupOperation,
+    SaveResourceInput,
+    WiringPlan,
+    save_resource_group,
+    start_group_operation,
+)
 
 
 class ConnectInput(BaseModel):
@@ -37,7 +44,7 @@ class OperationInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     op: str
     args: dict[str, Any] = Field(default_factory=dict)
-    takeover: bool = False
+    operation_epoch: int | None = None
     generation: int | None = None
     boot_id: str | None = None
 
@@ -55,6 +62,8 @@ def device_router(service: DeviceService) -> APIRouter:
 
     def check_scope(body):
         identity = service.state.get("identity") or {}
+        if body.operation_epoch is not None and body.operation_epoch != service.operation_epoch:
+            raise HTTPException(409, "设备已停止或连接已改变，请重新执行新动作。")
         if (body.generation is not None and body.generation != service.generation) or (
             body.boot_id is not None and body.boot_id != identity.get("boot_id")
         ):
@@ -84,6 +93,13 @@ def device_router(service: DeviceService) -> APIRouter:
         service.emit("wiring.changed", {"device_id": device_id, "revision": value["revision"]})
         return value
 
+    @router.post("/api/device/wiring-groups/from-resource")
+    async def wiring_from_resource(
+        body: SaveResourceInput, x_page_session: str = Header(default="")
+    ):
+        check_scope(body)
+        return await save_resource_group(service, body, page(x_page_session))
+
     @router.post("/api/device/wiring-groups/{group_id}/{action}", status_code=202)
     async def wiring_action(
         group_id: str,
@@ -91,6 +107,7 @@ def device_router(service: DeviceService) -> APIRouter:
         body: GroupOperation,
         x_page_session: str = Header(default=""),
     ):
+        check_scope(body)
         return await start_group_operation(
             service, body, group_id, page(x_page_session), action == "apply"
         )
@@ -108,8 +125,6 @@ def device_router(service: DeviceService) -> APIRouter:
     @router.post("/api/device/disconnect")
     async def disconnect(x_page_session: str = Header(default="")):
         token = page(x_page_session)
-        if service.owner and service.owner != token and service.pages.get(service.owner, 0):
-            raise HTTPException(403, "控制页面在线，请由该页面断开连接。")
         await service.disconnect()
         return service.view(token)
 
@@ -137,9 +152,7 @@ def device_router(service: DeviceService) -> APIRouter:
     @router.post("/api/device/operations", status_code=202)
     async def submit(body: OperationInput, x_page_session: str = Header(default="")):
         check_scope(body)
-        return await service.submit(
-            body.op, body.args, page(x_page_session), takeover=body.takeover
-        )
+        return await service.submit(body.op, body.args, page(x_page_session))
 
     @router.post("/api/device/batches", status_code=202)
     async def batch(body: list[OperationInput], x_page_session: str = Header(default="")):
@@ -166,9 +179,7 @@ def device_router(service: DeviceService) -> APIRouter:
 
     @router.post("/api/operations/{operation_id}/abort", status_code=202)
     async def abort(operation_id: str, x_page_session: str = Header(default="")):
-        token = page(x_page_session)
-        if service.owner != token:
-            raise HTTPException(403, "请先取得控制权。")
+        page(x_page_session)
         task = service.tasks.get(operation_id)
         if (
             not task
@@ -176,9 +187,9 @@ def device_router(service: DeviceService) -> APIRouter:
             or task["generation"] != service.generation
         ):
             raise HTTPException(409, "没有可中止的本代上传任务。")
-        if task["status"] not in {"created", "submitted", "accepted"} or task["progress"][
-            "phase"
-        ] in {"verifying", "committed"}:
+        if task["status"] not in {"created", "running", "submitted", "accepted"} or task[
+            "progress"
+        ]["phase"] in {"verifying", "committed"}:
             raise HTTPException(409, "上传已进入提交校验或已结束，请查询最终结果。")
         task["cancel_requested"] = True
         service.save(task)
@@ -192,8 +203,16 @@ def device_router(service: DeviceService) -> APIRouter:
         x_page_session: str = Header(default=""),
         generation: int | None = None,
         boot_id: str | None = None,
+        operation_epoch: int | None = None,
     ):
-        check_scope(OperationInput(op="storage.begin", generation=generation, boot_id=boot_id))
+        check_scope(
+            OperationInput(
+                op="storage.begin",
+                generation=generation,
+                boot_id=boot_id,
+                operation_epoch=operation_epoch,
+            )
+        )
         return await start_upload(service, file, name, page(x_page_session), secret=secret)
 
     @router.post("/api/device/ota/upload", status_code=202)
@@ -203,8 +222,16 @@ def device_router(service: DeviceService) -> APIRouter:
         x_page_session: str = Header(default=""),
         generation: int | None = None,
         boot_id: str | None = None,
+        operation_epoch: int | None = None,
     ):
-        check_scope(OperationInput(op="ota.begin", generation=generation, boot_id=boot_id))
+        check_scope(
+            OperationInput(
+                op="ota.begin",
+                generation=generation,
+                boot_id=boot_id,
+                operation_epoch=operation_epoch,
+            )
+        )
         return await start_upload(
             service, file, "firmware.bin", page(x_page_session), profile=profile
         )
@@ -265,7 +292,11 @@ def device_router(service: DeviceService) -> APIRouter:
             sender = asyncio.create_task(send())
             try:
                 while True:
-                    await socket.receive_text()
+                    message = await socket.receive_text()
+                    if message != "ping":
+                        value = json.loads(message)
+                        if value.get("type") == "observe":
+                            service.monitor(subscription, value.get("visible") is True)
             finally:
                 sender.cancel()
                 await asyncio.gather(sender, return_exceptions=True)
@@ -274,6 +305,7 @@ def device_router(service: DeviceService) -> APIRouter:
                 await socket.close(code=1008)
         finally:
             if subscription:
+                service.monitor(subscription, False)
                 service.subscribers.pop(subscription, None)
                 service.pages[token] -= 1
                 service.changed()

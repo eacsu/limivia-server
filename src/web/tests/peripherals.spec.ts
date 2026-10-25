@@ -3,27 +3,56 @@ import AxeBuilder from '@axe-core/playwright'
 import {
   reset,
   connect,
-  acquire,
+  ready,
   openResource,
   selectPin,
   selectLed,
   saveAndCheck,
+  saveGpio,
 } from './helpers'
 test.beforeEach(async ({ page }) => {
   await reset(page)
   await connect(page)
 })
+test('局域网 HTTP 缺少 randomUUID 时 GPIO10 仍可打开并保存接线草稿', async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(window.crypto, 'randomUUID', { value: undefined })
+  })
+  await page.reload()
+  const errors: string[] = []
+  page.on('pageerror', (error) => errors.push(String(error)))
+  const before = (await (await page.request.get('/api/testing/commands')).json()).commands.length
+  await selectPin(page, 'R5')
+  await page.locator('.pin-functions').getByRole('button', { name: /^GPIO/ }).click()
+  await expect(page.getByLabel('当前引脚', { exact: true })).toHaveText('GPIO10')
+  await saveGpio(page)
+  await expect(page.getByRole('button', { name: '保存方案', exact: true })).toBeDisabled()
+  await page.reload()
+  await page
+    .getByRole('navigation')
+    .getByRole('button', { name: /^GPIO\d* GPIO · 方案待应用$/ })
+    .click()
+  await expect(page.getByLabel('当前引脚', { exact: true })).toHaveText('GPIO10')
+  expect(errors).toEqual([])
+  const commands = (await (await page.request.get('/api/testing/commands')).json()).commands.slice(
+    before,
+  )
+  expect(commands.filter((c: { op: string }) => !['state', 'session.ping'].includes(c.op))).toEqual(
+    [],
+  )
+})
 test('从已接线引脚开始，选择与保存不执行设备写入', async ({ page }) => {
   const before = (await (await page.request.get('/api/testing/commands')).json()).commands.length
   await expect(page.getByRole('button', { name: '外设调试', exact: true })).toHaveCount(0)
   await openResource(page, 'PWM')
-  await expect(page.getByLabel('引脚 *', { exact: true })).toHaveValue('4')
+  await expect(page.getByLabel('当前引脚', { exact: true })).toHaveText('GPIO4')
+  await page.locator('.wiring-notes > summary').click()
   await page.getByLabel('接线组名称').fill('风扇调速')
   await page.getByRole('button', { name: '保存方案', exact: true }).click()
   await expect(page.getByRole('button', { name: '保存方案', exact: true })).toBeDisabled()
   await page.reload()
   await page.getByRole('button', { name: /风扇调速/ }).click()
-  await expect(page.getByLabel('引脚 *', { exact: true })).toHaveValue('4')
+  await expect(page.getByLabel('当前引脚', { exact: true })).toHaveText('GPIO4')
   const commands = (await (await page.request.get('/api/testing/commands')).json()).commands.slice(
     before,
   )
@@ -35,20 +64,21 @@ test('从已接线引脚开始，选择与保存不执行设备写入', async ({
 })
 test('共享方案版本冲突保留本地编辑，不覆盖其他页面', async ({ page, context }) => {
   await openResource(page, 'GPIO')
-  await page.getByRole('button', { name: '保存方案', exact: true }).click()
+  await saveGpio(page)
   await expect(page.getByRole('button', { name: '保存方案', exact: true })).toBeDisabled()
   const other = await context.newPage()
   await other.goto('/')
-  await other.getByRole('button', { name: /^GPIO GPIO · 方案待应用$/ }).click()
-  await other.getByLabel('接线组名称').fill('另一个页面的草稿')
-  await page.getByLabel('接线组名称').fill('主页面已保存')
+  await other.getByRole('button', { name: /^GPIO\d* GPIO · 方案待应用$/ }).click()
+
+  await other.getByLabel('接线方案名称').fill('另一个页面的草稿')
+  await page.getByLabel('接线方案名称').fill('主页面已保存')
   await page.getByRole('button', { name: '保存方案', exact: true }).click()
   await expect(other.getByText('另一页面已修改方案。', { exact: false })).toBeVisible()
-  await expect(other.getByLabel('接线组名称')).toHaveValue('另一个页面的草稿')
+  await expect(other.getByLabel('接线方案名称')).toHaveValue('另一个页面的草稿')
   await other.getByRole('button', { name: '保存方案', exact: true }).click()
   await expect(other.getByRole('alert').first()).toBeVisible()
   await other.getByRole('button', { name: '放弃本地修改并载入服务器版本' }).click()
-  await expect(other.getByLabel('接线组名称')).toHaveValue('主页面已保存')
+  await expect(other.getByLabel('接线方案名称')).toHaveValue('主页面已保存')
 })
 test('总线从一个引脚开始，整组补齐接线并带出子设备', async ({ page }) => {
   await openResource(page, 'I²C 主总线')
@@ -96,7 +126,8 @@ for (const width of [1280, 1440])
         stage.locator('.board-viewport > svg.board [data-pin-id="R16"]'),
       ).toBeInViewport()
       expect(await fixed()).toEqual(before)
-      await page.getByText('接线备注与供电位置', { exact: true }).click()
+      const notes = page.locator('.wiring-notes')
+      if ((await notes.getAttribute('open')) === null) await notes.locator('summary').click()
       const detail = page.locator('.inspector-content')
       await detail.hover()
       await page.mouse.wheel(0, 700)
@@ -122,7 +153,7 @@ for (const layout of [
       document.documentElement.style.zoom = String(z)
     }, layout.zoom)
     await openResource(page, 'GPIO')
-    await expect(page.getByLabel('引脚 *', { exact: true })).toHaveValue('4')
+    await expect(page.getByLabel('当前引脚', { exact: true })).toHaveText('GPIO4')
     await expect(page.getByLabel('接线与调试详情', { exact: true })).toBeFocused()
     await page.getByRole('button', { name: '← 返回板卡', exact: true }).click()
     await expect(page.locator('.board-stage [data-pin-id="R12"]:visible')).toBeFocused()
@@ -131,7 +162,7 @@ for (const layout of [
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   })
 test('接线组明确应用后才创建硬件资源', async ({ page }) => {
-  await acquire(page)
+  await ready(page)
   await openResource(page, 'PWM')
   await saveAndCheck(page)
   await page.getByRole('button', { name: '应用本组', exact: true }).click()

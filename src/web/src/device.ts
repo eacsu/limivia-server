@@ -5,8 +5,8 @@ export interface Parameter {
   name: string
   type: string
   required?: boolean
-  min?: number
-  max?: number
+  min?: number | null
+  max?: number | null
   values?: string
 }
 export interface Capability {
@@ -84,12 +84,29 @@ export interface DeviceState {
   } | null
   stale: boolean
   error: Value
-  control: { held: boolean; mine: boolean; owner_online: boolean }
+  operation_epoch: number
+  snapshot_sync: {
+    state: 'current' | 'recovering' | 'unavailable'
+    last_success_at: number | null
+    error: Value
+  }
   handles: Record<string, Record<string, Value>>
+  resource_observations?: Record<
+    string,
+    {
+      instance: number
+      generation: number
+      device_id: string
+      boot_id: string
+      observed_at: number
+      quality: 'confirmed' | 'recovering' | 'unknown'
+      level: 0 | 1 | null
+    }
+  >
   resource_values: Record<string, Args>
   samples: Record<string, Value[]>
   sampling: string[]
-  resource_owners: Record<string, boolean>
+  resource_origin: Record<string, 'managed' | 'external'>
 }
 export interface CatalogItem {
   op: string
@@ -116,17 +133,18 @@ export const initialState: DeviceState = {
   snapshot: null,
   stale: true,
   error: null,
-  control: { held: false, mine: false, owner_online: false },
+  operation_epoch: 0,
+  snapshot_sync: { state: 'unavailable', last_success_at: null, error: null },
   handles: {},
-  resource_owners: {},
+  resource_origin: {},
   resource_values: {},
   samples: {},
   sampling: [],
 }
 // 实物接线图仅消费从资源快照派生的只读视图，不作为设备协议模型。
-export type PinMode = 'idle' | 'input' | 'output' | 'pwm' | 'adc' | 'timer' | 'fault'
+export type PinMode = string
 export interface Snapshot {
-  pins: { pin: number; mode: PinMode; level: number | null }[]
+  pins: { pin: number; mode: PinMode; level: number | null; quality?: string; role?: string }[]
   sessions: { active: boolean }[]
 }
 export interface Sample {
@@ -143,6 +161,7 @@ export const terminal = (t: Operation) =>
   ['completed', 'failed', 'cancelled', 'unknown'].includes(t.status)
 export const phaseNames: Record<string, string> = {
   created: '准备提交',
+  running: '执行中',
   submitted: '已提交',
   accepted: '设备已受理',
   completed: '操作完成',
@@ -171,26 +190,81 @@ export const kindNames: Record<string, string> = {
   sigma_delta: 'Sigma-Delta',
 }
 export const friendlyError = (e: unknown) => (e instanceof Error ? e.message : String(e))
+export function gpioObservation(state: DeviceState, resource?: Resource) {
+  if (!resource || state.status !== 'ready' || state.stale || resource.state !== 'ready') return
+  const value = state.resource_observations?.[resource.id]
+  if (
+    (value?.quality === 'confirmed' || value?.quality === 'recovering') &&
+    value.instance === resource.instance &&
+    value.generation === state.generation &&
+    value.device_id === state.identity?.device_id &&
+    value.boot_id === state.identity?.boot_id &&
+    (value.level === 0 || value.level === 1)
+  )
+    return value
+}
 export function boardState(state: DeviceState): Snapshot {
   return {
     pins: PIN_NUMBERS.map((pin) => {
       const r = state.snapshot?.resources.find((r) => r.pin_mask & (2 ** pin))
-      return {
-        pin,
-        mode: (r?.state === 'fault'
+      const role = Object.entries((r?.definition.pins as Args) ?? {}).find(
+        ([, p]) => p === pin,
+      )?.[0]
+      const mode =
+        r?.state === 'fault'
           ? 'fault'
           : r?.kind === 'gpio'
             ? String((r.definition.config as Args)?.mode ?? 'input')
-            : (r?.kind ?? 'idle')) as PinMode,
-        level:
-          r?.kind === 'gpio'
-            ? typeof state.resource_values?.[r.id]?.level === 'number'
-              ? Number(state.resource_values[r.id].level)
-              : null
-            : null,
+            : (r?.kind ?? 'idle')
+      return {
+        pin,
+        mode,
+        role,
+        quality: state.status !== 'ready' || state.stale ? 'unknown' : (r?.state ?? 'idle'),
+        level: r?.kind === 'gpio' ? (gpioObservation(state, r)?.level ?? null) : null,
       }
     }),
     sessions: [{ active: state.status === 'ready' }],
+  }
+}
+export function pinStateLabel(pin: Snapshot['pins'][number] | undefined, compact = false) {
+  if (!pin || pin.mode === 'idle')
+    return {
+      short: pin?.quality === 'idle' ? (compact ? '闲' : '空闲') : '?',
+      full: pin?.quality === 'idle' ? '空闲' : '状态待核实',
+    }
+  const gpio = ['input', 'output', 'open_drain'].includes(pin.mode)
+  const names: Record<string, string> = {
+    input: '数字输入',
+    output: '数字输出',
+    open_drain: '开漏输出',
+    fault: '故障',
+  }
+  const shortNames: Record<string, string> = {
+    input: compact ? '入' : '输入',
+    output: compact ? '出' : '输出',
+    open_drain: compact ? '漏' : '开漏',
+    fault: '故障',
+    uart: compact ? '串口' : 'UART',
+    'adc.continuous': 'ADC',
+    'i2c.master': 'I²C',
+    'i2c.slave': 'I²C',
+    'i2c.device': 'I²C',
+    'spi.master': 'SPI',
+    'spi.slave': 'SPI',
+    'spi.device': 'SPI',
+    'rmt.tx': 'RMT',
+    'rmt.rx': 'RMT',
+    sigma_delta: 'ΣΔ',
+  }
+  const unknown =
+    pin.quality === 'unknown' || (pin.quality && !['ready', 'idle'].includes(pin.quality))
+  const level = unknown ? null : pin.level
+  return {
+    short:
+      (shortNames[pin.mode] ?? pin.mode.toUpperCase()) +
+      (gpio ? (level ?? '?') : unknown ? '?' : ''),
+    full: `${names[pin.mode] ?? kindNames[pin.mode] ?? pin.mode}${pin.role ? ` · ${pin.role}` : ''} · ${gpio ? (level === null ? '电平待核实' : `${level ? '高' : '低'}电平 ${level}`) : unknown ? '状态待核实' : '已配置'}`,
   }
 }
 export function decodeBinary(result: Args): Uint8Array {
@@ -204,23 +278,24 @@ export function adcSamples(result: Args, pin: number, instance: number): Sample[
   const events = Array.isArray(result.events) ? result.events : []
   return events.map((item) => {
     const e = item as Args
-    const bytes = decodeBinary({ length: 8, data: e.data })
-    const view = new DataView(bytes.buffer)
-    const mv = view.getInt32(4, true)
+    const typed = typeof e.raw === 'number'
+    const view = typed ? null : new DataView(decodeBinary({ length: 8, data: e.data }).buffer)
+    const mv = typed ? e.millivolts : view!.getInt32(4, true)
     return {
       pin,
       instance,
       sequence: Number(e.sequence),
-      raw: view.getInt32(0, true),
-      millivolts: mv < 0 ? null : mv,
-      calibrated: mv >= 0,
-      uptime_ms: Number(e.uptime_ms ?? 0),
+      raw: typed ? Number(e.raw) : view!.getInt32(0, true),
+      millivolts: typeof mv === 'number' && mv >= 0 ? mv : null,
+      calibrated: typeof mv === 'number' && mv >= 0,
+      uptime_ms: Number(e.uptime_ms ?? Number(e.time_us ?? 0) / 1000),
     }
   })
 }
 export interface DeviceScope {
   generation?: number
   boot_id?: string
+  operation_epoch?: number
 }
 class WorkbenchAPI {
   private scope: DeviceScope = {}
@@ -289,11 +364,10 @@ class WorkbenchAPI {
     }
     return r.json()
   }
-  submit(op: string, args: Args = {}, takeover = false, scope: DeviceScope = this.scope) {
+  submit(op: string, args: Args = {}, scope: DeviceScope = this.scope) {
     return this.request<Operation>('/api/device/operations', 'POST', {
       op,
       args,
-      takeover,
       ...scope,
     })
   }
@@ -312,7 +386,7 @@ class WorkbenchAPI {
     return current
   }
   async run(op: string, args: Args = {}, scope: DeviceScope = this.scope) {
-    return this.wait(await this.submit(op, args, false, scope))
+    return this.wait(await this.submit(op, args, scope))
   }
   async upload(file: File, name: string, secret = false, profile?: string) {
     const data = new FormData()
@@ -325,7 +399,7 @@ class WorkbenchAPI {
     const scoped =
       scope.generation === undefined
         ? url
-        : `${url}&generation=${scope.generation}&boot_id=${encodeURIComponent(scope.boot_id ?? '')}`
+        : `${url}&generation=${scope.generation}&boot_id=${encodeURIComponent(scope.boot_id ?? '')}&operation_epoch=${scope.operation_epoch}`
     return this.request<Operation>(scoped, 'POST', data)
   }
   async download(name: string) {
@@ -350,6 +424,9 @@ class WorkbenchAPI {
         )
         socket.onopen = () => {
           socket!.send(JSON.stringify({ page_session: page }))
+          socket!.send(
+            JSON.stringify({ type: 'observe', visible: document.visibilityState === 'visible' }),
+          )
           onConnection(true)
           ping = setInterval(() => {
             if (socket?.readyState === 1) socket.send('ping')
@@ -358,7 +435,11 @@ class WorkbenchAPI {
         socket.onmessage = (e) => {
           const feed = JSON.parse(e.data)
           if (feed.type === 'snapshot' && feed.data.identity)
-            this.scope = { generation: feed.data.generation, boot_id: feed.data.identity.boot_id }
+            this.scope = {
+              generation: feed.data.generation,
+              boot_id: feed.data.identity.boot_id,
+              operation_epoch: feed.data.operation_epoch,
+            }
           onFeed(feed)
           if (feed.type === 'wiring.changed')
             window.dispatchEvent(new CustomEvent('wiring-changed', { detail: feed.data }))
@@ -379,9 +460,17 @@ class WorkbenchAPI {
         if (!disposed) timer = setTimeout(open, 3000)
       }
     }
+    const visibility = () => {
+      if (socket?.readyState === 1)
+        socket.send(
+          JSON.stringify({ type: 'observe', visible: document.visibilityState === 'visible' }),
+        )
+    }
+    document.addEventListener('visibilitychange', visibility)
     void open()
     return () => {
       disposed = true
+      document.removeEventListener('visibilitychange', visibility)
       clearTimeout(timer)
       clearInterval(ping)
       socket?.close()

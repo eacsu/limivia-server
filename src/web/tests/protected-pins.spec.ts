@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test'
 import AxeBuilder from '@axe-core/playwright'
-import { reset, connect, selectPin, openResource } from './helpers'
+import { reset, connect, selectPin, openResource, saveGpio } from './helpers'
 
 const protectedPins = [
   ['R3', 'IO02', '启动配置'],
@@ -35,9 +35,9 @@ test('保护脚可用键盘查看原因，普通供电与 ADC2 未开放不误�
   await expect(page.locator('.board-inspector')).toContainText('ADC2 当前未开放，数字功能可用')
   await expect(page.locator('.pin-functions').getByRole('button', { name: /^GPIO/ })).toBeVisible()
   await openResource(page, 'GPIO')
-  await page.getByRole('button', { name: '保存方案', exact: true }).click()
+  await saveGpio(page)
   await expect(
-    page.locator('.board-stage .assigned-pin:visible .pin-protection-hatch'),
+    page.locator('.board-stage .assigned-pin:visible [data-state-icon="lock"]'),
   ).toHaveCount(0)
   const commands = (await (await page.request.get('/api/testing/commands')).json()).commands.slice(
     before,
@@ -55,7 +55,7 @@ for (const theme of ['vallum', 'abyssus'])
     { width: 320, zoom: 1 },
     { width: 1280, zoom: 2 },
   ])
-    test(`保护纹理正反面与放大图 · ${theme} · ${layout.width} · ${layout.zoom}`, async ({
+    test(`保护锁图标正反面与放大图 · ${theme} · ${layout.width} · ${layout.zoom}`, async ({
       page,
     }, info) => {
       await page.setViewportSize({ width: layout.width, height: 1000 })
@@ -69,53 +69,36 @@ for (const theme of ['vallum', 'abyssus'])
       if (await back.isVisible()) await back.click()
       const wrap = page.locator('.board-stage .board-wrap')
       const board = wrap.locator('> .board-viewport > svg.board')
-      await wrap.locator('> .board-legend .board-protection-legend').scrollIntoViewIfNeeded()
-      await expect(wrap.locator('> .board-legend .board-protection-legend')).toBeInViewport()
       for (const face of ['正面', '背面']) {
         await wrap
           .locator('> .board-toolbar .board-controls-row')
           .getByRole('button', { name: face, exact: true })
           .click()
-        await expect(board.locator('.pin-protection-hatch')).toHaveCount(7)
+        await expect(board.locator('[data-state-icon="lock"]')).toHaveCount(7)
         expect(
           await board
-            .locator('.pin-protection-hatch')
+            .locator('[data-state-icon="lock"]')
             .evaluateAll((nodes) =>
               nodes.map((n) => n.parentElement!.getAttribute('data-pin-id')).sort(),
             ),
         ).toEqual(protectedPins.map((p) => p[0]).sort())
         for (const id of ['L1', 'L13', 'R11', 'R12', 'L10'])
-          await expect(board.locator(`[data-pin-id="${id}"] .pin-protection-hatch`)).toHaveCount(0)
+          await expect(board.locator(`[data-pin-id="${id}"] [data-state-icon="lock"]`)).toHaveCount(0)
         const pin = board.locator('[data-pin-id="R8"]')
         await pin.hover()
         await pin.focus()
         await expect(pin).toBeFocused()
-        await expect(pin.locator('.pin-protection-hatch')).toBeVisible()
+        await expect(pin.locator('[data-state-icon="lock"]')).toBeVisible()
         await board.screenshot({ path: info.outputPath(`${face}-hatch.png`) })
       }
       await wrap.getByRole('button', { name: '放大接线图', exact: true }).click()
       const dialog = page.getByRole('dialog', { name: '实物接线图 · 32 引脚', exact: true })
       await expect(dialog).toBeVisible()
-      await expect(dialog.locator('.pin-protection-hatch')).toHaveCount(7)
-      const ids = await page
-        .locator('svg.board pattern')
-        .evaluateAll((nodes) => nodes.map((n) => n.id))
-      expect(new Set(ids).size).toBe(ids.length)
-      expect(
-        await dialog.locator('.pin-protection-hatch').evaluateAll((nodes) =>
-          nodes.every((n) => {
-            const id = n.getAttribute('fill')!.slice(5, -1)
-            return (
-              n.closest('svg')!.querySelectorAll('pattern').length === 1 &&
-              document.getElementById(id)?.closest('svg') === n.closest('svg')
-            )
-          }),
-        ),
-      ).toBe(true)
+      await expect(dialog.locator('.pin [data-state-icon="lock"]')).toHaveCount(7)
       await dialog.locator('[data-pin-id="R8"]').click()
       await expect(dialog.locator('.board-detail')).toContainText('当前查看：IO11 / GPIO 11')
       await expect(dialog.locator('.board-detail')).toContainText('Flash 电压／受保护')
-      await expect(dialog.locator('[data-pin-id="R8"] .pin-protection-hatch')).toBeVisible()
+      await expect(dialog.locator('[data-pin-id="R8"] [data-state-icon="lock"]')).toBeVisible()
       await dialog.screenshot({ path: info.outputPath('expanded-protected.png') })
       const results = await new AxeBuilder({ page })
         .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])

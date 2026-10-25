@@ -1,9 +1,9 @@
 import { test, expect } from '@playwright/test'
-import { reset, connect, acquire, openResource, selectLed, saveAndCheck } from './helpers'
+import { reset, connect, ready, openResource, selectLed, saveAndCheck, startGpio } from './helpers'
 test.beforeEach(async ({ page }) => reset(page))
 test('观察连接不抢控制，刷新后共享后端连接', async ({ page }) => {
   await connect(page)
-  await expect(page.locator('.control-status')).toHaveText('观察模式')
+  await expect(page.locator('.control-status')).toHaveCount(0)
   let commands = (await (await page.request.get('/api/testing/commands')).json()).commands
   expect(commands.filter((c: { op: string }) => c.op === 'control.acquire')).toHaveLength(0)
   await page.reload()
@@ -13,9 +13,9 @@ test('观察连接不抢控制，刷新后共享后端连接', async ({ page }) 
 })
 test('PWM 创建、操作和明确清理', async ({ page }) => {
   await connect(page)
-  await acquire(page)
+  await ready(page)
   await openResource(page, 'PWM')
-  await page.getByRole('combobox', { name: '引脚 *', exact: true }).selectOption('4')
+  await expect(page.getByLabel('当前引脚')).toHaveText('GPIO4')
   await expect(page.getByRole('button', { name: '应用本组', exact: true })).toBeDisabled()
   await saveAndCheck(page)
   await page.getByRole('button', { name: '应用本组', exact: true }).click()
@@ -23,13 +23,12 @@ test('PWM 创建、操作和明确清理', async ({ page }) => {
   await page.getByLabel('资源操作').selectOption('duty')
   await page.getByLabel('占空比（%） *').fill('25')
   await page.getByRole('button', { name: '执行操作', exact: true }).click()
-  page.once('dialog', (dialog) => dialog.accept())
   await page.getByRole('button', { name: '关闭资源', exact: true }).click()
   await expect(page.getByText('尚未应用 · 检查通过后才能配置设备。', { exact: true })).toBeVisible()
 })
 test('LED 只根据读回电平展示状态', async ({ page }) => {
   await connect(page)
-  await acquire(page)
+  await ready(page)
   await selectLed(page)
   await page.getByRole('button', { name: '点亮 LED', exact: true }).click()
   await expect(page.getByRole('heading', { name: '已点亮', exact: true })).toBeVisible()
@@ -38,41 +37,46 @@ test('LED 只根据读回电平展示状态', async ({ page }) => {
 })
 test('故障关闭保留占用，recover 重试关闭', async ({ page }) => {
   await connect(page)
-  await acquire(page)
+  await ready(page)
   await openResource(page, 'GPIO')
-  await page.getByRole('combobox', { name: '引脚 *', exact: true }).selectOption('0')
-  await saveAndCheck(page)
-  await page.getByRole('button', { name: '应用本组', exact: true }).click()
+  await page.getByRole('button', { name: '更换引脚', exact: true }).click()
+  await page.locator('.board-viewport [data-pin-id="L2"]').click()
+  await startGpio(page)
+  await page.getByText('资源详情与高级操作', { exact: true }).click()
   await expect(page.getByRole('heading', { name: /#\d+ · GPIO/ })).toBeVisible()
   await page.request.post('/api/testing/configure', { data: { cleanup_fault: true } })
-  page.once('dialog', (dialog) => dialog.accept())
   await page.getByRole('button', { name: '关闭资源', exact: true }).click()
   await expect(page.getByText('故障资源仍占用引脚；恢复动作会重试关闭。')).toBeVisible()
   await page.request.post('/api/testing/configure', { data: { cleanup_fault: false } })
-  page.once('dialog', (dialog) => dialog.accept())
   await page.getByRole('button', { name: '重试关闭', exact: true }).click()
-  await expect(page.getByText('尚未应用 · 检查通过后才能配置设备。', { exact: true })).toBeVisible()
+  await expect(page.locator('.gpio-current')).toContainText('尚未启用')
 })
-test('操作受理不是完成，取消等待原作业终态', async ({ page }) => {
+test('普通高层操作等待设备确认，未提供作业编号时不显示取消', async ({ page }) => {
   await connect(page)
-  await acquire(page)
+  await ready(page)
   await page.request.post('/api/testing/configure', { data: { hold_jobs: true } })
-  await openResource(page, 'GPIO')
-  await page.getByRole('combobox', { name: '引脚 *', exact: true }).selectOption('0')
-  await saveAndCheck(page)
-  await page.getByRole('button', { name: '应用本组', exact: true }).click()
-  await page.getByRole('button', { name: /操作记录/ }).click()
-  const dialog = page.getByRole('dialog', { name: '操作记录' })
-  await dialog.locator('.list-row').filter({ hasText: 'wiring.apply' }).getByRole('button').click()
-  await page.getByText('执行步骤与分块任务', { exact: true }).click()
-  await page.getByRole('button', { name: /resource.open · 设备已受理/ }).click()
-  await page.getByRole('button', { name: '请求取消', exact: true }).click()
-  await page.request.post('/api/testing/configure', { data: { hold_jobs: false } })
-  await expect(page.getByRole('heading', { name: 'resource.open · 已取消' })).toBeVisible()
+  try {
+    await openResource(page, 'PWM')
+    await saveAndCheck(page)
+    await page.getByRole('button', { name: '应用本组', exact: true }).click()
+    await page.getByRole('button', { name: /操作记录/ }).click()
+    const dialog = page.getByRole('dialog', { name: '操作记录' })
+    await dialog
+      .locator('.list-row')
+      .filter({ hasText: 'wiring.apply' })
+      .getByRole('button')
+      .click()
+    await page.getByText('执行步骤与分块任务', { exact: true }).click()
+    await page.getByRole('button', { name: /resource.open · 执行中/ }).click()
+    await expect(page.getByRole('button', { name: '请求取消', exact: true })).toHaveCount(0)
+  } finally {
+    await page.request.post('/api/testing/configure', { data: { hold_jobs: false } })
+  }
+  await expect(page.getByRole('heading', { name: 'resource.open · 操作完成' })).toBeVisible()
 })
 test('文件上传、校验提交和下载', async ({ page }) => {
   await connect(page)
-  await acquire(page)
+  await ready(page)
   await page.getByRole('navigation').getByRole('button', { name: '板上文件', exact: true }).click()
   await page
     .getByLabel('选择文件')
@@ -89,7 +93,7 @@ test('文件上传、校验提交和下载', async ({ page }) => {
 })
 test('流程编辑、上传加载、运行与停止分别反馈', async ({ page }) => {
   await connect(page)
-  await acquire(page)
+  await ready(page)
   await page.getByRole('navigation').getByRole('button', { name: '离线流程', exact: true }).click()
   await page.getByRole('button', { name: '校验流程', exact: true }).click()
   await expect(page.getByText(/本地校验通过/)).toBeVisible()
@@ -100,29 +104,25 @@ test('流程编辑、上传加载、运行与停止分别反馈', async ({ page 
   await page.getByRole('button', { name: '停止并清理', exact: true }).click()
   await expect(page.locator('.result').last()).toContainText('stopped')
 })
-test('多页面仅观察，原页离线后显式接管', async ({ page, context }) => {
+test('多个页面共享 LED 资源并直接操作', async ({ page, context }) => {
   await connect(page)
-  await acquire(page)
+  await selectLed(page)
+  await page.getByRole('button', { name: '点亮 LED', exact: true }).click()
+  await expect(page.getByRole('heading', { name: '已点亮', exact: true })).toBeVisible()
   const other = await context.newPage()
   await other.goto('/')
-  await expect(other.locator('.control-status')).toHaveText('其他页面控制中')
-  await expect(
-    other.getByRole('button', { name: '接管设备控制', exact: true }).first(),
-  ).toBeDisabled()
-  await page.close()
-  await expect(
-    other.getByRole('button', { name: '接管设备控制', exact: true }).first(),
-  ).toBeEnabled()
-  other.once('dialog', (dialog) => dialog.accept())
-  await other.getByRole('button', { name: '接管设备控制', exact: true }).first().click()
-  await expect(other.locator('.control-status')).toHaveText('已取得控制')
+  await selectLed(other)
+  await expect(other.getByRole('button', { name: '熄灭 LED', exact: true })).toBeEnabled()
+  await other.getByRole('button', { name: '熄灭 LED', exact: true }).click()
+  await expect(page.getByRole('heading', { name: '已熄灭', exact: true })).toBeVisible()
+  await expect(other.getByRole('heading', { name: '已熄灭', exact: true })).toBeVisible()
+  await other.close()
 })
 test('全局停止独立确认并撤销控制', async ({ page }) => {
   await connect(page)
-  await acquire(page)
-  page.once('dialog', (dialog) => dialog.accept())
+  await ready(page)
   await page.getByRole('button', { name: '停止所有实验', exact: true }).click()
-  await expect(page.locator('.control-status')).toHaveText('观察模式')
+  await expect(page.locator('.control-status')).toHaveCount(0)
   await page.getByRole('button', { name: /操作记录/ }).click()
   await expect(
     page.getByRole('dialog').locator('.list-row').filter({ hasText: 'outputs.stop' }),
@@ -130,7 +130,7 @@ test('全局停止独立确认并撤销控制', async ({ page }) => {
 })
 test('IoT 网络表单和只写凭据', async ({ page }) => {
   await connect(page, 'iot')
-  await acquire(page)
+  await ready(page)
   await page.getByRole('navigation').getByRole('button', { name: '联网通信', exact: true }).click()
   await page.getByLabel('网络名称', { exact: true }).fill('LAB-FIXTURE')
   await page.getByLabel('新密码', { exact: true }).fill('private-test-password')

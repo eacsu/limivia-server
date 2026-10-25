@@ -5,13 +5,14 @@ from __future__ import annotations
 import inspect
 from typing import get_args
 
-from limivia import AsyncConnection
 from limivia.types import Operation, ResourceKind
 
 OPERATIONS = get_args(Operation.__value__)
 KINDS = get_args(ResourceKind.__value__)
 INTERNAL = {
     "hello",
+    "control.acquire",
+    "control.release",
     "session.ping",
     "event.subscribe",
     "event.unsubscribe",
@@ -94,7 +95,7 @@ LABELS = {
 }
 
 
-def catalog(connection: AsyncConnection) -> list[dict]:
+def catalog(connection) -> list[dict]:
     """从公开门面的签名取得字段名，补充中文业务语义；不导入 SDK 私有 schema。"""
     result = []
     for op in OPERATIONS:

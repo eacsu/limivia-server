@@ -77,6 +77,8 @@ class FakeTransport:
         self.buffers = {}
         self.levels = {}
         self.sequence = 0
+        self.notification_gaps = False
+        self.notice_sequence = 0
         self.fail_chunk = False
         self.cleanup_fault = False
         self.capabilities = json.loads(
@@ -172,6 +174,20 @@ class FakeTransport:
         op = wire["method"]
         command = {"id": wire.get("id"), "op": op, "params": p, "context": context}
         self.commands.append(command)
+        if self.notification_gaps and op == "resource.call" and p.get("action") == "status":
+            self.notice_sequence += 3
+            await self.emit(
+                {
+                    "event": "state.changed",
+                    "event_sequence": self.notice_sequence,
+                    "revision": 1,
+                    "resource": p["resource"],
+                    "instance": p["resource"],
+                    "job_id": 0,
+                    "sequence": 0,
+                    "dropped": 0,
+                }
+            )
         if op != "hello":
             assert type(context["seq"]) is int
             self.hello["sequence_high"] = max(self.hello["sequence_high"], context["seq"])
@@ -262,6 +278,11 @@ class FakeTransport:
             result = copy.deepcopy(self.jobs[p["job_id"]])
             result["cancel_requested"] = True
         elif op == "resource.get":
+            if p["resource"] not in self.resources:
+                await self.emit(
+                    {"id": wire["id"], "ok": False, "error": {"reason": "resource_not_found"}}
+                )
+                return
             result = self.resources[p["resource"]]
         elif op.startswith(("storage.", "ota.", "flow.", "buffer.")):
             try:

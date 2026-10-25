@@ -47,16 +47,25 @@ def doctor() -> None:
     logger.info("前端构建: %s", (WEB_DIST / "index.html").exists())
     try:
         import limivia
+        from limivia import AsyncConnection, AsyncGPIOPin
         from limivia.types import DeviceIdentity
 
         contract = DeviceIdentity.model_json_schema()["properties"]["contract"]["const"]
+        if (
+            metadata.version("limivia") != "0.3.0a3"
+            or not hasattr(AsyncConnection, "raw")
+            or not hasattr(AsyncGPIOPin, "write")
+        ):
+            raise ValueError("需要 limivia 0.3.0a3 高层业务接口")
         if contract != "limivia-v3-jsonrpc2":
             raise ValueError("SDK contract 不兼容")
         logger.info("SDK: %s / %s / %s", metadata.version("limivia"), limivia.__file__, contract)
         provenance = metadata.distribution("limivia").read_text("direct_url.json")
         logger.info("SDK 安装来源: %s", provenance or "包索引安装；请另外核对构建来源")
     except (ImportError, KeyError, ValueError, metadata.PackageNotFoundError) as exc:
-        logger.error("请使用项目 .venv 的 pip 手动安装已核验的 JSON-RPC v3 SDK wheel。")
+        logger.error(
+            "请使用项目 .venv 的 pip 手动安装已核验的 limivia 0.3.0a3 JSON-RPC v3 SDK wheel。"
+        )
         raise typer.Exit(1) from exc
 
 

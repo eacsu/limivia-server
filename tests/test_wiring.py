@@ -6,7 +6,7 @@ from fastapi import HTTPException
 from limivia_server.devices.wiring import WiringPlan, WiringStore
 
 from . import test_devices
-from .test_devices import acquire, completed, connect, until
+from .test_devices import completed, connect, ready, until
 
 wiring_api = test_devices.api
 
@@ -55,8 +55,8 @@ def test_group_check_apply_and_existing_binding_not_replaced(wiring_api):
     client, backend, _, _ = wiring_api
     _, plan, scope = setup_plan(client)
     base = "/api/device/wiring-groups/button/"
-    assert client.post(base + "apply", json=scope).status_code == 403
-    acquire(client)
+    assert client.post(base + "apply", json=scope).status_code == 409
+    ready(client)
     assert client.post(base + "apply", json=scope).status_code == 409
     assert (
         completed(client, client.post(base + "check", json=scope).json())["status"] == "completed"
@@ -73,7 +73,7 @@ def test_group_check_apply_and_existing_binding_not_replaced(wiring_api):
 def test_revision_and_boot_are_checked_before_hardware_write(wiring_api):
     client, backend, _, _ = wiring_api
     url, plan, scope = setup_plan(client)
-    acquire(client)
+    ready(client)
     base = "/api/device/wiring-groups/button/"
     assert client.post(base + "check", json={**scope, "boot_id": "old"}).status_code == 409
     assert (
@@ -107,3 +107,94 @@ def test_parent_cycle_is_rejected():
                 {"id": "b", "name": "b", "parent_group": "a"},
             ],
         )
+
+
+def resource_save_body(client):
+    state = connect(client)
+    ready(client)
+    opened = completed(
+        client,
+        test_devices.command(
+            client,
+            "resource.open",
+            {"kind": "gpio", "pins": {"pin": 10}, "config": {"mode": "output", "level": 1}},
+        ),
+    )
+    resource = opened["result"]["resource"]
+    state = until(
+        client, "/api/device", lambda s: not s["stale"] and len(s["snapshot"]["resources"]) == 1
+    )
+    return {
+        "device_id": state["identity"]["device_id"],
+        "boot_id": state["identity"]["boot_id"],
+        "generation": state["generation"],
+        "revision": 0,
+        "resource": resource,
+        "instance": state["snapshot"]["resources"][0]["instance"],
+        "group_id": "external-led",
+        "name": "外置 LED",
+        "notes": "实验记录",
+        "plan": {"board": state["identity"]["board"], "revision": 0},
+    }
+
+
+def test_save_existing_gpio_is_atomic_idempotent_and_has_no_write(wiring_api):
+    client, backend, _, _ = wiring_api
+    body = resource_save_body(client)
+    before = copy.deepcopy(backend.connection.resources)
+    start = len(backend.connection.commands)
+    response = client.post("/api/device/wiring-groups/from-resource", json=body)
+    assert response.status_code == 200, response.text
+    assert response.json()["groups"][0]["config"]["level"] == 1
+    repeated = client.post("/api/device/wiring-groups/from-resource", json=body)
+    assert repeated.status_code == 200, repeated.text
+    assert repeated.json() == response.json()
+    assert backend.connection.resources == before
+    assert not any(
+        c["op"] in {"resource.open", "resource.close", "resource.recover", "control.acquire"}
+        or (c["op"] == "resource.call" and c["params"]["action"] != "status")
+        for c in backend.connection.commands[start:]
+    )
+    state = client.get("/api/device").json()
+    assert state["wiring_bindings"]["external-led"]["resource"] == body["resource"]
+
+
+def test_save_existing_gpio_rejects_scope_conflict_and_duplicate_association(wiring_api):
+    client, backend, _, _ = wiring_api
+    body = resource_save_body(client)
+    url = "/api/device/wiring-groups/from-resource"
+    for patch in [{"boot_id": "old"}, {"instance": 999}, {"revision": 3}]:
+        assert client.post(url, json={**body, **patch}).status_code == 409
+    saved = client.post(url, json=body)
+    assert saved.status_code == 200, saved.text
+    duplicate = {**body, "group_id": "other", "revision": 1, "plan": saved.json()}
+    assert client.post(url, json=duplicate).status_code == 409
+    plan = saved.json()
+    plan["title"] = "另一页面修改"
+    assert client.put("/api/wiring-plans/" + body["device_id"], json=plan).status_code == 200
+    conflict = client.post(url, json=body)
+    assert conflict.status_code == 409
+    assert len(backend.connection.resources) == 1
+
+
+def test_observer_can_record_existing_gpio_without_gaining_control(wiring_api):
+    client, backend, _, _ = wiring_api
+    body = resource_save_body(client)
+    observer = client.post("/api/pages").json()["page_session"]
+    headers = {"x-page-session": observer}
+    saved = client.post("/api/device/wiring-groups/from-resource", json=body, headers=headers)
+    assert saved.status_code == 200, saved.text
+    state = client.get("/api/device", headers=headers).json()
+    assert "control" not in state
+    assert state["resource_origin"][str(body["resource"])] == "managed"
+    assert len(backend.connection.resources) == 1
+    completed(
+        client, test_devices.command(client, "resource.close", {"resource": body["resource"]})
+    )
+    until(client, "/api/device", lambda s: not s["snapshot"]["resources"])
+    assert (
+        client.post(
+            "/api/device/wiring-groups/from-resource", json=body, headers=headers
+        ).status_code
+        == 409
+    )

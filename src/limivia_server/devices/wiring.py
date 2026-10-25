@@ -70,9 +70,19 @@ class WiringPlan(BaseModel):
 class GroupOperation(BaseModel):
     model_config = ConfigDict(extra="forbid")
     device_id: str
+    operation_epoch: int | None = None
     revision: int = Field(ge=0)
     generation: int
     boot_id: str
+
+
+class SaveResourceInput(GroupOperation):
+    resource: int = Field(gt=0)
+    instance: int = Field(gt=0)
+    group_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    name: str = Field(min_length=1, max_length=80)
+    notes: str = Field(default="", max_length=2000)
+    plan: WiringPlan
 
 
 class WiringStore:
@@ -93,11 +103,19 @@ class WiringStore:
             else WiringPlan(board=board or "unknown", revision=0).model_dump()
         )
 
-    def save(self, device: str, plan: WiringPlan):
+    def save(self, device: str, plan: WiringPlan, association=None):
         # 同一数据库事务内比较并更新；跨进程亦不会覆盖旧版本。
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
             old = self.get(device, plan.board)
+            if association and old["revision"] == plan.revision + 1:
+                group_id, binding = association
+                existing = self.bindings(device).get(group_id)
+                if existing == {**binding, "plan_revision": old["revision"]} and old == {
+                    **plan.model_dump(),
+                    "revision": old["revision"],
+                }:
+                    return old
             if old["revision"] != plan.revision:
                 raise HTTPException(409, {"reason": "wiring_conflict", "current": old})
             if old["revision"] and old["board"] != plan.board:
@@ -108,6 +126,12 @@ class WiringStore:
                 "INSERT OR REPLACE INTO plans VALUES (?,?)",
                 (device, json.dumps(value, ensure_ascii=False)),
             )
+            if association:
+                group_id, binding = association
+                self.db.execute(
+                    "INSERT OR REPLACE INTO bindings VALUES (?,?,?)",
+                    (device, group_id, json.dumps({**binding, "plan_revision": value["revision"]})),
+                )
         return value
 
     def bind(self, device, group_id, value):
@@ -144,6 +168,81 @@ def active_bindings(service):
             r["id"] == value["resource"] and r["instance"] == value["instance"] for r in resources
         )
     }
+
+
+async def save_resource_group(service, body: SaveResourceInput, page):
+    def target():
+        identity = service.state.get("identity") or {}
+        if (identity.get("device_id"), identity.get("boot_id"), service.generation) != (
+            body.device_id,
+            body.boot_id,
+            body.generation,
+        ) or body.plan.board != identity.get("board"):
+            raise HTTPException(409, "目标设备、启动、板型或连接代次已改变。")
+        resource = next(
+            (
+                r
+                for r in (service.state.get("snapshot") or {}).get("resources", [])
+                if r["id"] == body.resource and r["instance"] == body.instance
+            ),
+            None,
+        )
+        if not resource or resource["kind"] != "gpio" or resource["state"] != "ready":
+            raise HTTPException(409, "GPIO 资源已改变或尚未就绪，请重新读取。")
+        for group_id, binding in active_bindings(service).items():
+            same = binding["resource"] == body.resource and binding["instance"] == body.instance
+            if (same and group_id != body.group_id) or (group_id == body.group_id and not same):
+                raise HTTPException(409, "资源或接线组已有其他关联，请核对方案。")
+        return resource
+
+    if body.revision != body.plan.revision:
+        raise HTTPException(409, "方案版本不一致。")
+    target()
+    reading = await service.execute(
+        "resource.call", {"resource": body.resource, "action": "status", "args": {}}, page
+    )
+    resource = target()
+    level = (reading.get("result") or {}).get("level")
+    if type(level) is not int or level not in (0, 1):
+        raise HTTPException(409, "尚未取得有效电平，未保存方案。")
+    definition = copy.deepcopy(resource["definition"])
+    definition["config"] = {**definition.get("config", {}), "level": level}
+    groups = [g.model_dump() for g in body.plan.groups]
+    old = next((g for g in groups if g["id"] == body.group_id), {})
+    group = WiringGroup.model_validate(
+        {
+            **old,
+            "id": body.group_id,
+            "name": body.name,
+            "notes": body.notes,
+            "kind": "gpio",
+            "pins": definition["pins"],
+            "config": definition["config"],
+            "parent_group": None,
+            "controller": None,
+        }
+    ).model_dump()
+    groups = [group if g["id"] == body.group_id else g for g in groups]
+    if not old:
+        groups.append(group)
+    plan = WiringPlan.model_validate({**body.plan.model_dump(), "groups": groups})
+    value = service.wiring.save(
+        body.device_id,
+        plan,
+        (
+            body.group_id,
+            {
+                "boot_id": body.boot_id,
+                "resource": body.resource,
+                "instance": body.instance,
+                "definition": definition,
+            },
+        ),
+    )
+    service.wiring_checked = None
+    service.emit("wiring.changed", {"device_id": body.device_id, "revision": value["revision"]})
+    service.changed()
+    return value
 
 
 def group_definition(service, body, group_id):
@@ -192,7 +291,7 @@ async def start_group_operation(service, body, group_id, page, apply=False):
         body.boot_id,
         body.revision,
         group_id,
-        service.control_epoch,
+        service.operation_epoch,
     )
     if apply and service.wiring_checked != checked:
         raise HTTPException(409, "请先检查当前版本的本组接线。")
@@ -207,8 +306,8 @@ async def start_group_operation(service, body, group_id, page, apply=False):
 
 async def run_group_operation(service, body, group_id, definition, checked, task, page, apply):
     async def run(op, args):
-        if service.generation != body.generation or service.control_epoch != checked[-1]:
-            raise HTTPException(409, "连接或控制状态已改变，停止后续步骤。")
+        if service.generation != body.generation or service.operation_epoch != checked[-1]:
+            raise HTTPException(409, "连接已改变或设备已停止，停止后续步骤。")
         return await service.execute(op, args, page, parent=task["id"])
 
     try:

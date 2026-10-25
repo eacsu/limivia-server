@@ -1,6 +1,6 @@
 # LIMIVIA 工作台 JSON-RPC v3 集成契约
 
-当前 server 已适配 limivia SDK 0.3.0a1 的 JSON-RPC 2.0 契约 `limivia-v3-jsonrpc2`，拒绝旧包络。浏览器使用 HTTP 业务操作与类型化 WebSocket 消息，设备 session/control/seq 由 SDK 管理，不向浏览器透传。
+当前 server 使用 limivia SDK 0.3.0a3 高层 Python 接口，线协议仍为 JSON-RPC 2.0 契约 `limivia-v3-jsonrpc2`，拒绝旧包络。浏览器使用 HTTP 业务操作与类型化 WebSocket 消息，设备 session/control/seq 由 SDK 管理，不向浏览器透传。
 
 本次同步已经存在的冻结 v3 协议，不修改固件 wire 语义。下方保存 SDK 的协议快照及其末尾实机修正说明；其中“SDK/server 暂不适配”“SDK 0.3.0a1 仍为自定义包络”等原文属于冻结固件的历史发布上下文，不表示当前状态。业务结果以当前公开 SDK 类型与实现为准。
 
@@ -180,3 +180,7 @@ IoT power.configure{auto_light_sleep?:false,modem_sleep?:"none"/"min"/"max"}；�
 当前 `main/engine.c:operate` 和 USB 实机确认：`gpio.group.read` 的 wire args 为 `{"resources":[{"resource":1}]}`，整数数组会返回 -32602/invalid_argument。上游业务章节中的整数数组写法不符合生产实现；SDK 门面 `gpio.group_read(resources=[id,...])` 负责构造资源对象，直接 send 使用对象数组。保留上游原文供追溯，不复制其错误到 SDK。
 
 SDK 的发送与序号记账另外核对了 `main/runtime.c`：完整帧按 RPC 优先级进入 FIFO 队列，batch 先登记全部 seq 再执行。后续同优先级有效响应可确认旧帧已准入或丢弃，只释放序号准入记账，不替旧请求合成结果。普通查询和写帧共用设备普通准入位置，因此 SDK 串行发送该类在途帧；心跳/作业查询与停止仍有独立有界通道。
+
+## 2026-10-25 通知恢复修正
+
+本轮 SDK 来源 c4499b8、固件来源 c92b2a0，分别从 dev 建立 fix/board-state-session。线协议与板级电气边界不变。event_sequence 不连续才表示通知缺口；data.available.dropped 是该资源累计样本/驱动队列丢弃数，不能充当通知丢失。固件每端点通知队列从 1 增至 16，仍有界且响应优先，慢消费者仍可能丢通知。服务收到缺口后合并查询，不撤销已确认状态；长期查询失败、连接结束及实例变化分别处理。协议令牌由 SDK 自动协调，页面控制归属已经移除。

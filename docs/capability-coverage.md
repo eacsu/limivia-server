@@ -12,9 +12,9 @@ SDK 公开 Operation 共 76 项、ResourceKind 共 18 项。业务类型来自 S
 |2|`session.ping`|SDK 连接管理器|SDK 后台心跳|连接/发现/快照集成；unsubscribe 由 SDK 门面提供，页面不单独撤销共享订阅|
 |3|`event.subscribe`|SDK 连接管理器|管理器统一订阅|连接/发现/快照集成；unsubscribe 由 SDK 门面提供，页面不单独撤销共享订阅|
 |4|`event.unsubscribe`|SDK 连接管理器|管理器生命周期内部基础能力|连接/发现/快照集成；unsubscribe 由 SDK 门面提供，页面不单独撤销共享订阅|
-|5|`control.acquire`|`POST /api/device/operations`|设备工作台控制按钮|控制/接管/全局停止集成与浏览器闭环|
-|6|`control.release`|`POST /api/device/operations`|设备工作台控制按钮|控制/接管/全局停止集成与浏览器闭环|
-|7|`outputs.stop`|`POST /api/device/stop`|顶栏停止所有实验|控制/接管/全局停止集成与浏览器闭环|
+|5|`control.acquire`|SDK 连接管理器|写操作自动协调；页面不暴露|自动获取及跨页面共享资源集成|
+|6|`control.release`|SDK 连接生命周期|页面不暴露|结束连接清理本连接资源|
+|7|`outputs.stop`|`POST /api/device/stop`|顶栏停止所有实验|全局停止与新操作代次集成及浏览器闭环|
 |8|`capabilities`|SDK 连接管理器|SDK discover 聚合|连接/发现/快照集成；unsubscribe 由 SDK 门面提供，页面不单独撤销共享订阅|
 |9|`state`|SDK 连接管理器|SDK state.snapshot 聚合|连接/发现/快照集成；unsubscribe 由 SDK 门面提供，页面不单独撤销共享订阅|
 |10|`diagnostics`|`POST /api/device/operations`|设备维护诊断|通用分派契约|

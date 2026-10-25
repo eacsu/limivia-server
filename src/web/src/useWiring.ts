@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, type DeviceState } from './device'
-import type { WiringPlan } from './wiring'
+import { mergeSavedPlan, type WiringPlan } from './wiring'
 export function useWiring(state: DeviceState) {
   const deviceId = state.identity?.device_id ?? ''
   const [loadedDevice, setLoadedDevice] = useState('')
@@ -65,23 +65,41 @@ export function useWiring(state: DeviceState) {
   }, [deviceId, load])
   const dirty =
     loadedDevice === deviceId && !!plan && JSON.stringify(plan) !== JSON.stringify(saved)
-  const save = async () => {
+  const saveDraft = async (
+    submitted: WiringPlan,
+    association?: {
+      group_id: string
+      name: string
+      notes: string
+      resource: number
+      instance: number
+    },
+  ) => {
     if (!plan || !deviceId) return
-    const submitted = plan
+    const baseline = plan
     setSaving(true)
     setError('')
     try {
-      const value = await api.request<WiringPlan>(
-        '/api/wiring-plans/' + encodeURIComponent(deviceId),
-        'PUT',
-        submitted,
-      )
+      const value = association
+        ? await api.request<WiringPlan>('/api/device/wiring-groups/from-resource', 'POST', {
+            ...association,
+            plan: submitted,
+            revision: submitted.revision,
+            device_id: deviceId,
+            ...api.deviceScope(),
+          })
+        : await api.request<WiringPlan>(
+            '/api/wiring-plans/' + encodeURIComponent(deviceId),
+            'PUT',
+            submitted,
+          )
       if (current.current.deviceId !== deviceId) return
       setSaved(value)
       setPlan((local) =>
-        local === submitted ? value : local ? { ...local, revision: value.revision } : value,
+        local === baseline ? value : local ? mergeSavedPlan(local, baseline, value) : value,
       )
       setRemote(null)
+      return value
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
       await load()
@@ -99,7 +117,10 @@ export function useWiring(state: DeviceState) {
     remote,
     error,
     load,
-    save,
+    save: async () => {
+      if (plan) await saveDraft(plan)
+    },
+    saveDraft,
     acceptRemote: () => {
       if (remote) {
         setPlan(remote)

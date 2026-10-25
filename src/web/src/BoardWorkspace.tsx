@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
 import { Board } from './Board'
 import { PinFunctions } from './PinFunctions'
+import { SimpleConfig } from './SimpleConfig'
+import { GpioStatus } from './GpioStatus'
+import { useGpioStatus } from './useGpioStatus'
+import { DirectGpio } from './DirectGpio'
 import { BOARD_PINS, type BoardPin } from './board'
 import { api, boardState, kindNames, type DeviceState, type Capability } from './device'
 import { Fields, Action, Result } from './Forms'
-import { ControlAction } from './ControlAction'
 import { LedPanel } from './LedPanel'
 import { ResourceActions } from './ResourceActions'
 import {
@@ -36,6 +39,12 @@ export function BoardWorkspace({
 }) {
   const { plan, setPlan } = wiring
   const [pending, setPending] = useState<{ cap: Capability; gpio: number } | null>(null)
+  const [gpioDrafts, setGpioDrafts] = useState<Record<string, WiringGroup>>({})
+  const [gpioActionHost, setGpioActionHost] = useState<HTMLDivElement | null>(null)
+  const [gpioPicking, setGpioPicking] = useState<{
+    draft: WiringGroup
+    selection: BoardSelection
+  } | null>(null)
   const [assignError, setAssignError] = useState('')
   const [assign, setAssign] = useState<string | null>(null)
   const [checked, setChecked] = useState('')
@@ -53,6 +62,7 @@ export function BoardWorkspace({
         )
       : undefined
   const cap = state.discovery?.resources.find((c) => c.kind === group?.kind)
+  const simpleGroup = group?.kind === 'gpio' || group?.kind === 'pwm'
   const binding = group ? state.wiring_bindings?.[group.id] : undefined
   const bound = binding
     ? state.snapshot?.resources.find(
@@ -62,13 +72,62 @@ export function BoardWorkspace({
   const selectedPins =
     group && plan
       ? groupPins(group, plan.groups)
-      : pin?.gpio !== undefined
-        ? [pin.gpio]
-        : resource
-          ? Object.values((resource.definition.pins ?? {}) as Record<string, number>)
-          : []
+      : selection?.type === 'experiment'
+        ? [selection.gpio]
+        : pin?.gpio !== undefined
+          ? [pin.gpio]
+          : resource
+            ? Object.values((resource.definition.pins ?? {}) as Record<string, number>)
+            : []
+  const selectedGpioResource = [
+    bound,
+    resource,
+    state.snapshot?.resources.find(
+      (r) =>
+        r.kind === 'gpio' && selectedPins.length === 1 && !!(r.pin_mask & (2 ** selectedPins[0])),
+    ),
+  ].find((r) => r?.kind === 'gpio')
+  const directGpio =
+    selection?.type === 'experiment' || group?.kind === 'gpio' || resource?.kind === 'gpio'
+  const showGpio =
+    directGpio ||
+    group?.kind === 'gpio' ||
+    (!!selectedGpioResource &&
+      !(pin?.gpio === 13 && state.identity?.board === 'luatos-esp32c3-usb'))
+  const gpioModel = useGpioStatus(state, showGpio ? selectedGpioResource : undefined, online)
+  const gpioSelectionKey =
+    showGpio && selectedGpioResource
+      ? `${state.generation}:${selectedGpioResource.id}:${selectedGpioResource.instance}`
+      : ''
+  useEffect(() => {
+    if (gpioSelectionKey)
+      inspector.current?.querySelector('.inspector-content')?.scrollTo({ top: 0 })
+  }, [gpioSelectionKey])
   const selectPin = (value: BoardPin) => {
     lastPhysical.current = value.id
+    if (gpioPicking) {
+      const gpioCap = state.discovery?.resources.find((c) => c.kind === 'gpio')
+      if (
+        value.gpio === undefined ||
+        !gpioCap ||
+        !pinFunctions(state, value.gpio).some((c) => c.kind === 'gpio')
+      ) {
+        setAssignError('此位置不能承担当前信号角色，请重新选择。')
+        return
+      }
+      const next = {
+        ...gpioPicking.draft,
+        id: newGroup(gpioCap).id,
+        pins: { pin: value.gpio },
+        name: `GPIO${value.gpio}`,
+      }
+      setGpioDrafts((current) => ({ ...current, [`gpio-${value.gpio}`]: next }))
+      setGpioPicking(null)
+      setAssignError('')
+      onSelect({ type: 'experiment', gpio: value.gpio })
+      requestAnimationFrame(() => inspector.current?.focus({ preventScroll: true }))
+      return
+    }
     if (assign && group) {
       if (
         value.gpio === undefined ||
@@ -95,7 +154,15 @@ export function BoardWorkspace({
       value.gpio === undefined
         ? []
         : (plan?.groups.filter((g) => groupPins(g, plan.groups).includes(value.gpio!)) ?? [])
-    onSelect(belonging[0] ? { type: 'group', id: belonging[0].id } : { type: 'pin', id: value.id })
+    onSelect(
+      belonging[0] && !(belonging.length > 1 && belonging.every((g) => g.kind === 'gpio'))
+        ? { type: 'group', id: belonging[0].id }
+        : value.gpio !== 13 && state.snapshot?.resources.some(
+              (r) => r.kind === 'gpio' && value.gpio !== undefined && !!(r.pin_mask & (2 ** value.gpio)),
+            )
+          ? { type: 'experiment', gpio: value.gpio! }
+          : { type: 'pin', id: value.id },
+    )
   }
   const updateGroup = (patch: Partial<WiringGroup>) => {
     if (plan && group)
@@ -118,6 +185,10 @@ export function BoardWorkspace({
     setChecked('')
   }
   const chooseFunction = (capability: Capability) => {
+    if (capability.kind === 'gpio' && pin?.gpio !== undefined) {
+      onSelect({ type: 'experiment', gpio: pin.gpio })
+      return
+    }
     if (pin?.gpio === undefined) {
       create(capability)
       return
@@ -181,20 +252,9 @@ export function BoardWorkspace({
       pinLabels[p] = [pinLabels[p], g.name].filter(Boolean).join('、')
   return (
     <>
-      <div className="page-heading">
-        <h1>设备工作台</h1>
-        <span>实物接线 → 配置 → 调试</span>
-      </div>
-      {!state.identity ? (
-        <div className="empty-state">
-          <h2>连接服务主机可访问的设备</h2>
-          <p>从 USB / BLE 选择设备，或填写 WS / MQTT 目标。连接后保持观察模式。</p>
-          <button className="primary" onClick={onConnect}>
-            连接设备
-          </button>
-        </div>
-      ) : (
-        <>
+      <div className="board-workbench-heading">
+        <div className="page-heading"><h1>设备工作台</h1></div>
+        {state.identity && (
           <div className="wiring-toolbar">
             <label>
               接线方案
@@ -222,8 +282,19 @@ export function BoardWorkspace({
                       : '读取接线方案'}
             </span>
             <div className="flex-space" />
-            <ControlAction state={state} />
           </div>
+        )}
+      </div>
+      {!state.identity ? (
+        <div className="empty-state">
+          <h2>连接服务主机可访问的设备</h2>
+          <p>从 USB / BLE 选择设备，或填写 WS / MQTT 目标。连接后即可开始实验。</p>
+          <button className="primary" onClick={onConnect}>
+            连接设备
+          </button>
+        </div>
+      ) : (
+        <>
           {wiring.error && <p role="alert">{wiring.error}</p>}
           {wiring.remote && (
             <div className="notice" role="alert">
@@ -247,12 +318,39 @@ export function BoardWorkspace({
             </div>
           )}
           <div
-            className={`board-workspace ${assign ? 'picking-pin' : ''} ${selection ? 'has-selection' : ''}`}
+            className={`board-workspace ${assign || gpioPicking ? 'picking-pin' : ''} ${selection ? 'has-selection' : ''}`}
           >
             <section className="board-stage" aria-label="实物板卡与接线" tabIndex={0}>
+              {(assign || gpioPicking) && (
+                <div className="pin-picking-status">
+                  <span role={assignError ? 'alert' : 'status'}>
+                    {assignError ||
+                      (gpioPicking ? '在板图选择新引脚' : `选择${label(assign!)}的新位置`)}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAssign(null)
+                      if (gpioPicking) {
+                        onSelect(gpioPicking.selection)
+                        setGpioPicking(null)
+                      }
+                      setAssignError('')
+                      requestAnimationFrame(() => inspector.current?.focus({ preventScroll: true }))
+                    }}
+                  >
+                    取消更换
+                  </button>
+                </div>
+              )}
               {knownBoard ? (
                 <Board
                   state={boardState(state)}
+                  selectedStatus={
+                    showGpio
+                      ? `GPIO${selectedPins[0]} · ${selectedGpioResource ? `${gpioModel.modeText} · ${['状态待核实', '结果待核实', '读取中'].includes(gpioModel.qualifier) ? gpioModel.qualifier : gpioModel.levelText}` : directGpio ? '未启用' : '未应用'}`
+                      : undefined
+                  }
                   selected={selectedPins[0] ?? -1}
                   ready={online && state.status === 'ready'}
                   highlighted={selectedPins}
@@ -296,45 +394,130 @@ export function BoardWorkspace({
                 <h2>
                   {group
                     ? group.name
-                    : resource
-                      ? `设备上的 ${kindNames[resource.kind]}`
-                      : pin
-                        ? pin.gpio === 13 && knownBoard
-                          ? '板载 LED · D5'
-                          : `${pin.label}${pin.gpio === undefined ? '' : ` / GPIO ${pin.gpio}`}`
-                        : selection?.type === 'internal'
-                          ? '片内功能'
-                          : '从已接线的位置开始'}
+                    : selection?.type === 'experiment'
+                      ? `GPIO${selection.gpio} · 引脚实验`
+                      : resource
+                        ? `设备上的 ${kindNames[resource.kind]}`
+                        : pin
+                          ? pin.gpio === 13 && knownBoard
+                            ? '板载 LED · D5'
+                            : `${pin.label}${pin.gpio === undefined ? '' : ` / GPIO ${pin.gpio}`}`
+                          : selection?.type === 'internal'
+                            ? '片内功能'
+                            : '从已接线的位置开始'}
                 </h2>
                 <p>
                   {group
                     ? kindNames[group.kind]
-                    : resource
-                      ? '未归组配置 · 以设备读回为准'
-                      : pin
-                        ? pin.gpio === 13 && knownBoard
-                          ? 'GPIO13 · 板载实验灯'
-                          : `${pin.id} · ${pin.description}`
-                        : selection?.type === 'internal'
-                          ? '这些功能没有独立 GPIO。'
-                          : '选择引脚或已有接线组'}
+                    : selection?.type === 'experiment'
+                      ? selectedGpioResource
+                        ? '临时实验 · 设备已启用'
+                        : '临时配置 · 未执行'
+                      : resource
+                        ? '未归组配置 · 以设备读回为准'
+                        : pin
+                          ? pin.gpio === 13 && knownBoard
+                            ? 'GPIO13 · 板载实验灯'
+                            : `${pin.id} · ${pin.description}`
+                          : selection?.type === 'internal'
+                            ? '这些功能没有独立 GPIO。'
+                            : '选择引脚或已有接线组'}
                 </p>
+                {directGpio && (
+                  <button
+                    className="text-button inspector-function-back"
+                    onClick={() => {
+                      const physical = BOARD_PINS.find((p) => p.gpio === selectedPins[0])
+                      if (physical) onSelect({ type: 'pin', id: physical.id })
+                    }}
+                  >
+                    选择其他功能
+                  </button>
+                )}
               </header>
+              {showGpio && selectedPins[0] !== undefined && (
+                <GpioStatus
+                  model={gpioModel}
+                  resource={selectedGpioResource}
+                  gpio={selectedPins[0]}
+                  showOutputControl={!directGpio}
+                />
+              )}
               <div className="inspector-content">
-                {group ? (
+                {directGpio && state.discovery?.resources.find((c) => c.kind === 'gpio') ? (
+                  <DirectGpio
+                    key={group?.id ?? `gpio-${selectedPins[0]}`}
+                    gpio={selectedPins[0]}
+                    capability={state.discovery.resources.find((c) => c.kind === 'gpio')!}
+                    state={state}
+                    online={online}
+                    resource={state.snapshot?.resources.find(
+                      (r) => !!(r.pin_mask & (2 ** selectedPins[0])),
+                    )}
+                    model={gpioModel}
+                    actionHost={gpioActionHost}
+                    wiring={wiring}
+                    initial={gpioDrafts[group?.id ?? `gpio-${selectedPins[0]}`] ?? group}
+                    onDraft={(draft) =>
+                      setGpioDrafts((current) => ({
+                        ...current,
+                        [group?.id ?? `gpio-${selectedPins[0]}`]: draft,
+                      }))
+                    }
+                    onSaved={(id) => onSelect({ type: 'group', id })}
+                    onStopped={() =>
+                      onSelect(
+                        group
+                          ? { type: 'group', id: group.id }
+                          : { type: 'experiment', gpio: selectedPins[0] },
+                      )
+                    }
+                    onChangePin={(draft) => {
+                      setGpioPicking({ draft, selection })
+                      setAssignError('')
+                      onSelect(null)
+                      setAssign(null)
+                    }}
+                  />
+                ) : group ? (
                   <>
                     <form onSubmit={(e) => e.preventDefault()}>
-                      <label className="field">
-                        接线组名称
-                        <input
-                          value={group.name}
-                          onChange={(e) => updateGroup({ name: e.target.value })}
-                        />
-                      </label>
-                      <p className="muted">
-                        接线由你记录；实际连接未自动检测。保存方案不会改变设备输出。
-                      </p>
-                      {cap &&
+                      {simpleGroup && <h3 className="plan-config-title">方案配置</h3>}
+                      {!simpleGroup && (
+                        <>
+                          <label className="field">
+                            接线组名称
+                            <input
+                              value={group.name}
+                              onChange={(e) => updateGroup({ name: e.target.value })}
+                            />
+                          </label>
+                          <p className="muted">
+                            接线由你记录；实际连接未自动检测。保存方案不会改变设备输出。
+                          </p>
+                        </>
+                      )}
+                      {simpleGroup && (
+                        <div className="pin-summary">
+                          <span>引脚</span>
+                          <output aria-label="当前引脚">
+                            {group.pins.pin === undefined ? '未分配' : `GPIO${group.pins.pin}`}
+                          </output>
+                          <button
+                            type="button"
+                            className="text-button"
+                            aria-pressed={assign === 'pin'}
+                            onClick={() => {
+                              setAssign(assign === 'pin' ? null : 'pin')
+                              setAssignError('')
+                            }}
+                          >
+                            更换引脚
+                          </button>
+                        </div>
+                      )}
+                      {!simpleGroup &&
+                        cap &&
                         pinRoles(cap).map((role) => (
                           <div className="role-row" key={role}>
                             <label className="field">
@@ -377,7 +560,7 @@ export function BoardWorkspace({
                             </button>
                           </div>
                         ))}
-                      {assign && (
+                      {assign && !simpleGroup && (
                         <p role="status">
                           请在左侧板图选择 {label(assign)}，电源和保护脚不能分配为信号。
                           {assignError}
@@ -402,16 +585,34 @@ export function BoardWorkspace({
                         </label>
                       )}
                       {cap ? (
-                        <Fields
-                          fields={cap.config}
-                          value={group.config}
-                          onChange={(config) => updateGroup({ config })}
-                        />
+                        simpleGroup ? (
+                          <SimpleConfig
+                            kind={group.kind as 'gpio' | 'pwm'}
+                            fields={cap.config}
+                            value={group.config}
+                            onChange={(config) => updateGroup({ config })}
+                          />
+                        ) : (
+                          <Fields
+                            fields={cap.config}
+                            value={group.config}
+                            onChange={(config) => updateGroup({ config })}
+                          />
+                        )
                       ) : (
                         <p>当前固件未提供本组功能，方案仍被保留。</p>
                       )}
-                      <details>
-                        <summary>接线备注与供电位置</summary>
+                      <details className="wiring-notes">
+                        <summary>{simpleGroup ? '名称与接线备注' : '接线备注与供电位置'}</summary>
+                        {simpleGroup && (
+                          <label className="field">
+                            接线组名称
+                            <input
+                              value={group.name}
+                              onChange={(e) => updateGroup({ name: e.target.value })}
+                            />
+                          </label>
+                        )}
                         <label className="field">
                           备注
                           <textarea
@@ -468,7 +669,11 @@ export function BoardWorkspace({
                           : bound
                             ? '设备已有本组配置；修改方案不会自动替换它。'
                             : checked
-                              ? '预检通过，未预留资源；应用时设备仍会检查。'
+                              ? !enabled
+                                ? '预检通过；请先取得本页控制权，才能应用。'
+                                : state.stale
+                                  ? '预检通过；正在同步设备状态，完成后才能应用。'
+                                  : '预检通过，未预留资源；应用时设备仍会检查。'
                               : '尚未应用 · 检查通过后才能配置设备。'}
                       </p>
                     </form>
@@ -502,7 +707,7 @@ export function BoardWorkspace({
                       <button
                         disabled={!!bound || plan?.groups.some((g) => g.parent_group === group.id)}
                         onClick={() => {
-                          if (plan && confirm('仅从方案移除此组？不会关闭板上资源。')) {
+                          if (plan) {
                             setPlan({
                               ...plan,
                               groups: plan.groups.filter((g) => g.id !== group.id),
@@ -586,6 +791,7 @@ export function BoardWorkspace({
                   </div>
                 )}
               </div>
+              {directGpio && <div className="direct-gpio-action-host" ref={setGpioActionHost} />}
               <button
                 className="inspector-diagnostics function-row"
                 onClick={() => diagnostics.current?.showModal()}
