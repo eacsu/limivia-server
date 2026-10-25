@@ -331,7 +331,7 @@ def test_open_is_not_completed_before_its_snapshot_is_published(observation_api,
     async def exercise():
         started, release = asyncio.Event(), asyncio.Event()
 
-        async def slow():
+        async def slow(**_kwargs):
             started.set()
             await release.wait()
             return await original()
@@ -349,5 +349,87 @@ def test_open_is_not_completed_before_its_snapshot_is_published(observation_api,
         result = await service.wait(task["id"])
         assert result["status"] == "completed"
         assert service.sync.resource(result["result"]["resource"])
+
+    client.portal.call(exercise)
+
+
+def test_initialization_waits_for_slow_snapshot_and_clears_previous_error(
+    observation_api, monkeypatch
+):
+    import asyncio
+
+    client, _, service, _ = observation_api
+    connect(client)
+    original = service.connection.state.snapshot
+    service.sync.grace = 0.01
+
+    async def exercise():
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def slow():
+            started.set()
+            await release.wait()
+            return await original()
+
+        monkeypatch.setattr(service.connection.state, "snapshot", slow)
+        service.state.update(status="discovering", stale=True, error="之前的读取失败")
+        initializing = asyncio.create_task(service._initialise(service.generation))
+        try:
+            await started.wait()
+            await asyncio.sleep(service.sync.grace * 3)
+            assert not initializing.done()
+            assert service.state["status"] == "discovering"
+        finally:
+            release.set()
+            await initializing
+        assert service.state["status"] == "ready"
+        assert not service.state["stale"]
+        assert service.state["error"] is None
+
+    client.portal.call(exercise)
+
+
+def test_initialization_failure_identifies_snapshot_timeout(observation_api, monkeypatch):
+    client, _, service, _ = observation_api
+    connect(client)
+
+    async def timed_out():
+        raise TimeoutError
+
+    monkeypatch.setattr(service.connection.state, "snapshot", timed_out)
+    client.portal.call(service._initialise, service.generation)
+    assert service.state["status"] == "discovery_failed"
+    assert "状态快照读取失败（timeout）" in service.state["error"]
+    assert "等待设备确认或状态读取超时" in service.state["error"]
+
+
+def test_stop_waits_for_slow_readback_without_reporting_unknown(observation_api, monkeypatch):
+    import asyncio
+
+    client, _, service, _ = observation_api
+    connect(client)
+    original = service.connection.state.snapshot
+    service.sync.grace = 0.01
+
+    async def exercise():
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def slow():
+            started.set()
+            await release.wait()
+            return await original()
+
+        monkeypatch.setattr(service.connection.state, "snapshot", slow)
+        task = await service.submit("outputs.stop", {}, internal=True)
+        try:
+            await started.wait()
+            await asyncio.sleep(service.sync.grace * 3)
+            assert task["status"] == "running"
+        finally:
+            release.set()
+        result = await service.wait(task["id"])
+        assert result["status"] == "completed"
+        assert result["error"] is None
+        assert result["result"]["cleanup_faults"] == 0
 
     client.portal.call(exercise)

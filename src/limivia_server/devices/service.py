@@ -391,24 +391,33 @@ class DeviceService:
         self.initializing = self.spawn(self._initialise(self.generation, refresh=refresh))
 
     async def _initialise(self, generation, *, refresh=False):
+        phase = "固件能力"
         try:
             if generation != self.generation or not self.connection:
                 return
             await self.execute("discover", {"refresh": refresh}, internal=True)
             if generation != self.generation or not self.connection:
                 return
+            phase = "状态快照"
             await self.execute("state.snapshot", {}, internal=True)
             if generation != self.generation or not self.connection:
                 return
             if generation == self.generation:
-                self.state.update(status="ready", stale=False)
+                self.state.update(status="ready", stale=False, error=None)
                 self.changed()
-        except Exception:  # noqa: BLE001 — 生命周期边界记录失败，不泄露设备原始凭据。
+        except Exception as exc:  # noqa: BLE001 — 生命周期边界，错误经过凭据脱敏。
             if generation == self.generation and self.connection:
+                detail = getattr(exc, "detail", None)
+                if isinstance(detail, dict):
+                    reason = detail.get("reason", "read_failed")
+                    message = detail.get("message") or reason
+                else:
+                    reason = type(exc).__name__
+                    message = str(detail or exc) or reason
                 self.state.update(
                     status="discovery_failed",
                     stale=True,
-                    error="能力或状态读取失败；请重新读取。",
+                    error=self.clean(f"{phase}读取失败（{reason}）：{message}；请重新读取。"),
                 )
                 self.changed()
 
@@ -578,7 +587,7 @@ class DeviceService:
             if info and info["kind"] == "gpio" and args["action"] in {"read", "status"}:
                 result = self.clean(await self.sync.read(info))
             elif op == "state.snapshot":
-                result = await self.sync.snapshot()
+                result = await self.sync.snapshot(wait_timeout=self.job_timeout)
             else:
                 result = self.clean(await driver.execute(op, args))
             if generation != self.generation:
@@ -633,7 +642,7 @@ class DeviceService:
                 "flow.stop",
             }:
                 self.sync.invalidate_structure()
-                await self.sync.snapshot()
+                await self.sync.snapshot(wait_timeout=self.job_timeout)
             task.update(status="completed", result=operation_result)
         except asyncio.CancelledError:
             task.update(
@@ -657,7 +666,16 @@ class DeviceService:
             error = (
                 device_error.model_dump(mode="json")
                 if device_error
-                else {"reason": "sdk_operation", "message": str(exc), "may_have_executed": possible}
+                else {
+                    "reason": "timeout" if isinstance(exc, TimeoutError) else "sdk_operation",
+                    "message": str(exc)
+                    or (
+                        "等待设备确认或状态读取超时。"
+                        if isinstance(exc, TimeoutError)
+                        else type(exc).__name__
+                    ),
+                    "may_have_executed": possible,
+                }
             )
             job = getattr(exc, "job", None)
             if device_error and device_error.reason == "job_expired":

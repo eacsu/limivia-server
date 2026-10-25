@@ -50,7 +50,7 @@ class StateSync:
         }
         service.state["stale"] = unavailable
 
-    async def snapshot(self):
+    async def snapshot(self, *, wait_timeout=None):
         service = self.service
         driver, generation = service.business, service.generation
         if not driver or service.ending:
@@ -62,7 +62,10 @@ class StateSync:
         task = self.snapshot_task
         started = time.monotonic()
         try:
-            return await asyncio.wait_for(asyncio.shield(task), self.grace)
+            # 保鲜宽限只限制后台观察等待；初始化和业务操作等待完整分页结果。
+            return await asyncio.wait_for(
+                asyncio.shield(task), self.grace if wait_timeout is None else wait_timeout
+            )
         except TimeoutError as exc:
             if scope == (service.generation, service.business):
                 self.snapshot_failed(exc, started)
