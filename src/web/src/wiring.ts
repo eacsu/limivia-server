@@ -1,5 +1,5 @@
 import { type Args, type DeviceState, type Capability } from './device'
-import { BOARD_PINS } from './board'
+import { BOARD_PINS } from './boardPins'
 import { numericBound, parameterOptions } from './parameters'
 export interface WiringGroup {
   id: string

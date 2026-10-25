@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { pinStateLabel, type Snapshot } from './device'
-import { BOARD_PINS, displaySide, type BoardFace, type BoardPin } from './board'
+import { BOARD_PINS, displaySide, type BoardFace, type BoardPin } from './boardPins'
 import { PinStateIcon } from './PinStateIcon'
 import { pinStateGlyph, type PinGlyph } from './pinState'
 import ledMarkLight from './assets/figma/pin-state/led-mark-vallum.svg'
