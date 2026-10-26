@@ -14,6 +14,7 @@ from fastapi import HTTPException
 from limivia import (
     AsyncLimivia,
     Backend,
+    DeviceConnectionError,
     OperationError,
     ResultUnknownError,
     SubscriptionOverflowError,
@@ -126,7 +127,13 @@ class DeviceService:
             )
             self.store.save(task)
         self.sdk = await self.sdk_context.enter_async_context(
-            AsyncLimivia(backend=self.backend, job_timeout=self.job_timeout)
+            AsyncLimivia(
+                backend=self.backend,
+                job_timeout=self.job_timeout,
+                ble_adapter=(
+                    os.environ.get("LIMIVIA_BLE_ADAPTER") if self.backend is None else None
+                ),
+            )
         )
 
         self.spawn(self._monitor())
@@ -326,6 +333,7 @@ class DeviceService:
                 self.connection = connection
                 self.business = BusinessConnection(connection)
                 self.business.snapshot_reader = self.sync.snapshot
+                self.business.resource_lookup = self.sync.resource
                 self.ending = False
                 identity = connection.identity.to_dict()
                 if self.last_identity and self.last_identity != identity:
@@ -354,10 +362,12 @@ class DeviceService:
                     await asyncio.gather(raw_reader, return_exceptions=True)
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001 — 生命周期边界记录失败，不泄露设备原始凭据。
+        except Exception as exc:  # noqa: BLE001 — 生命周期边界，具体 SDK 连接错误经过脱敏。
             if not self.state["error"]:
                 self.state["error"] = (
-                    "连接或身份验证失败，请检查目标、协议契约、传输配置和服务主机权限。"
+                    self.clean(str(exc))
+                    if isinstance(exc, DeviceConnectionError)
+                    else ("连接或身份验证失败，请检查目标、协议契约、传输配置和服务主机权限。")
                 )
         finally:
             if generation == self.generation:
@@ -396,6 +406,7 @@ class DeviceService:
         try:
             if generation != self.generation or not self.connection:
                 return
+            self.sync.initial_failure_scope = None
             await self.execute("discover", {"refresh": refresh}, internal=True)
             if generation != self.generation or not self.connection:
                 return
@@ -420,6 +431,9 @@ class DeviceService:
                     stale=True,
                     error=self.clean(f"{phase}读取失败（{reason}）：{message}；请重新读取。"),
                 )
+                if phase == "状态快照":
+                    self.sync.initial_failure_scope = (generation, self.business)
+                    self.sync.restore_readiness()
                 self.changed()
 
     async def disconnect(self):
@@ -592,9 +606,18 @@ class DeviceService:
         try:
             if generation != self.generation or not driver or self.ending:
                 raise ValueError("连接已改变或正在结束。")
+            info = self.sync.resource(args.get("resource")) if op == "resource.call" else None
+            fast = (op == "resource.open" and args.get("kind") == "gpio") or (
+                info
+                and (
+                    (info["kind"] == "gpio" and args.get("action") in {"read", "write", "status"})
+                    or (info["kind"] == "pwm" and args.get("action") in {"duty", "status"})
+                )
+            )
             snapshot = self.sync.snapshot_task
             if (
-                op not in OBSERVE | {"discover", "state.snapshot", "outputs.stop"}
+                not fast
+                and op not in OBSERVE | {"discover", "state.snapshot", "outputs.stop"}
                 and snapshot
                 and not snapshot.done()
             ):
@@ -606,6 +629,8 @@ class DeviceService:
                 raise ValueError("设备已停止或连接已改变，未执行旧动作。")
             if not internal:
                 self.authorize(op, page, args=args)
+            if fast:
+                self.sync.foreground_version += 1
             info = self.sync.resource(args.get("resource")) if op == "resource.call" else None
             if info and args["action"] not in {"read", "status", "events"}:
                 self.sync.invalidate(info["id"])
@@ -639,7 +664,13 @@ class DeviceService:
                     and args["action"] in {"read", "status", "write"}
                 ):
                     if args["action"] == "write":
-                        result = await self.sync.read(info)
+                        if (
+                            result.get("resource") != info["id"]
+                            or result.get("instance") != info["instance"]
+                        ):
+                            raise ValueError("设备回复的资源身份不匹配。")
+                        self._observe(info, result)
+                        self.sync.failures.pop(resource, None)
                 else:
                     self.resource_values[resource] = result
                 events = result.get("events", [])
@@ -667,8 +698,26 @@ class DeviceService:
                 "flow.stop",
             }:
                 self.sync.invalidate_structure()
-                await self.sync.snapshot(wait_timeout=self.job_timeout)
+                if fast and op == "resource.open":
+                    info = result["info"]
+                    if (
+                        info["state"] != "ready"
+                        or info["id"] != result["resource"]
+                        or info["instance"] != result["instance"]
+                    ):
+                        raise ValueError("设备回复缺少已确认的资源身份。")
+                    snapshot = self.state["snapshot"]
+                    if snapshot is not None:
+                        snapshot["resources"] = [
+                            r for r in snapshot["resources"] if r["id"] != info["id"]
+                        ] + [info]
+                    self._observe(info, result)
+                    self.monitor_wake.set()
+                else:
+                    await self.sync.snapshot(wait_timeout=self.job_timeout)
             task.update(status="completed", result=operation_result)
+            if fast and op == "resource.open":
+                self.schedule_refresh()
         except asyncio.CancelledError:
             task.update(
                 status="unknown",
@@ -754,7 +803,20 @@ class DeviceService:
                 raise HTTPException(422, "破坏性操作需要确认文字。")
         if sum(t["status"] not in TERMINAL for t in self.tasks.values()) + len(commands) > 64:
             raise HTTPException(429, "任务队列已满；全局停止请使用独立入口。")
-        params = [binary_inputs(command.args) for command in commands]
+        try:
+            params = [
+                self.business.wire_args(command.op, binary_inputs(command.args))
+                for command in commands
+            ]
+        except (ValueError, KeyError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+        for command in commands:
+            if command.op == "resource.call" and command.args.get("action") not in {
+                "read",
+                "status",
+                "events",
+            }:
+                self.sync.invalidate(command.args["resource"])
         for command in commands:
             self.remember_secrets(command.args)
         tasks = [self.new_task(item.op, page) for item in commands]
@@ -903,6 +965,14 @@ class DeviceService:
             if op == "resource.call" and not task["result_expired"] and result:
                 resource = str(args["resource"])
                 self.resource_values[resource] = self.clean(result)
+                info = self.sync.resource(args["resource"])
+                if (
+                    info
+                    and info["kind"] == "gpio"
+                    and result.get("resource") == info["id"]
+                    and result.get("instance") == info["instance"]
+                ):
+                    self._observe(info, result)
                 events = result.get("events", [])
                 if isinstance(events, list):
                     previous = self.samples.get(resource, [])

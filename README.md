@@ -1,8 +1,10 @@
 # LIMIVIA 莉米维娅
 
-连接数字世界与物理世界的本机硬件实验工作台。浏览器访问同源 Python 后端，后端通过 **limivia 0.3.0a3 / JSON-RPC 2.0 / 业务协议 v3** 连接合宙 CORE ESP32-C3 简约版，支持 USB、BLE、WebSocket 和 MQTT。界面沿用 MANAS 工作台关系与苍渊·白垣 Token，默认白垣。
+连接数字世界与物理世界的本机硬件实验工作台。浏览器访问同源 Python 后端，后端通过 **limivia 0.3.0a7 / JSON-RPC 2.0 / 业务协议 v3** 连接合宙 CORE ESP32-C3 简约版，支持 USB、BLE、WebSocket 和 MQTT。界面沿用 MANAS 工作台关系与苍渊·白垣 Token，默认白垣。
 
-设备契约必须为 `limivia-v3-jsonrpc2`；相同包版本或 protocol=3 本身不能证明兼容。旧 v1/v2、历史自定义 v3 不兼容。
+SDK 与固件当前统一为 **0.3.0a7**。本轮合入 WebSocket 握手生命周期、`TCP_NODELAY` 及 PWM 实际占空比确认修复，沿用现有 API；验证见 [a7 集成记录](docs/a7-verification.md)。
+
+设备契约必须为 `limivia-v3-jsonrpc2-r2`；相同包版本或 protocol=3 本身不能证明兼容。旧 v1/v2、历史自定义 v3 不兼容。
 
 ## 安装与启动
 
@@ -14,7 +16,7 @@ poetry install
 pnpm --dir src/web install
 pnpm --dir src/web run build
 # SDK 按项目约定由 pip 单独安装已核验的 wheel。
-poetry run python -m pip install /实际路径/limivia-0.3.0a3-py3-none-any.whl
+poetry run python -m pip install /实际路径/limivia-0.3.0a7-py3-none-any.whl
 poetry run python -m pip check
 poetry run limivia-server doctor
 poetry run limivia-server serve --port 8000
@@ -24,7 +26,7 @@ poetry run limivia-server serve --port 8000
 
 **SDK 按用户要求不写入 TOML、不由 Poetry 锁定，也不随仓库归档。** 先执行 Poetry 安装，再用 pip 安装 SDK。后续执行 `poetry install` 或 `poetry sync` 可能调整 SDK 所需的传递依赖，需再次执行 SDK 安装、pip check 和 doctor。doctor 显示实际版本、导入位置、契约与 pip 安装来源，不访问硬件。其他服务依赖继续使用 Poetry 和清华源。
 
-本次使用的 SDK 来自独立 limivia 仓库 `dev` 提交 `7b3c1c3`，已合入业务说明中的升级；wheel SHA256 为 `cd6eb31703a6e63267dd2f865f3f7f33b4ccd970a5969e011b855a75b76653ed`。这是本次验证来源记录，不是运行时相邻目录依赖。
+当前核验的 SDK 为独立 limivia 仓库提交 `fcb253c` 构建的 0.3.0a7 wheel，SHA256 为 `342e4260a9260e1929f166a87ce426828164a6c3cf2439749d6b7548a16d33e3`。这是本次验证来源记录，不是运行时相邻目录依赖。
 
 ## 从连接到实验
 
@@ -111,3 +113,9 @@ E2E 在 `127.0.0.1:18000` 启动隔离测试服务，真实 server 和 SDK 连�
 点击板图上已有 GPIO 的引脚，会直接进入实验面板。模式按钮立即可见；输入模式只读取电平，切为数字输出后主按钮明确显示将输出的高/低电平，执行后同一按钮显示已确认电平并可继续切换。“选择其他功能”可回到 PWM、总线等功能目录。LED 模式切换、GPIO 配置替换、单个资源关闭、释放引脚、保存记录和从方案移除不再弹浏览器确认。
 
 用户明确选择取消所有二次确认：停止全部实验、断开连接、级联关闭、删除/格式化、固件上传、联网重配置与自动启动等均由按钮直接执行。维护操作不再要求手动输入确认文字，浏览器按所选操作自动附加后端协议要求的确认参数；后端校验、设备确认、错误反馈与禁止写入自动重试仍保留。
+
+Linux 多适配器环境可用 `poetry run limivia-server serve --ble-adapter hci1`，或设置 `LIMIVIA_BLE_ADAPTER=hci1`。适配器选择由 SDK 同时用于扫描与连接；Windows 不设置 Linux 的 hciN。
+
+本轮资源直接确认与 BLE 单次对照见 [a5 验证记录](docs/resource-direct-a5-verification.md)。
+
+当前 a6 的只读协议精简、USB 同连接对照及工作台实机验证见 [a6 USB 验证记录](docs/usb-a6-verification.md)。写入延迟持平，BLE 未在本轮验收。

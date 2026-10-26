@@ -13,22 +13,36 @@ class StateSync:
         self.snapshot_scope = None
         self.snapshot_failed_at = None
         self.structure_version = 0
+        self.foreground_version = 0
         self.reads = {}
         self.failures = {}
         self.versions = {}
         self.grace = 3.0
         self.snapshot_duration = 0.0
+        self.initial_failure_scope = None
 
     def reset(self):
         self.snapshot_scope = None
         self.snapshot_failed_at = None
         self.snapshot_duration = 0.0
+        self.foreground_version = 0
+        self.initial_failure_scope = None
         self.reads.clear()
         self.failures.clear()
         self.versions.clear()
 
     def invalidate_structure(self):
         self.structure_version += 1
+
+    def restore_readiness(self):
+        service = self.service
+        if (
+            self.initial_failure_scope == (service.generation, service.business)
+            and service.state["discovery"] is not None
+            and service.state["snapshot_sync"]["state"] == "current"
+        ):
+            self.initial_failure_scope = None
+            service.state.update(status="ready", stale=False, error=None)
 
     def invalidate(self, resource):
         key = str(resource)
@@ -70,7 +84,7 @@ class StateSync:
                 asyncio.shield(task), budget if wait_timeout is None else wait_timeout
             )
         except TimeoutError as exc:
-            if scope == (service.generation, service.business):
+            if scope == (service.generation, service.business) and not service.foreground_pending():
                 self.snapshot_failed(exc, started)
                 service.changed()
             raise
@@ -81,7 +95,21 @@ class StateSync:
         try:
             while True:
                 version = self.structure_version
-                snapshot = (await driver.board.state.snapshot()).model_dump(mode="json")
+                foreground = self.foreground_version
+                try:
+                    snapshot = (await driver.board.state.snapshot()).model_dump(mode="json")
+                except Exception as exc:
+                    if (
+                        getattr(getattr(exc, "error", None), "reason", None) == "snapshot_expired"
+                        and foreground != self.foreground_version
+                        and generation == service.generation
+                        and driver is service.business
+                        and not service.ending
+                    ):
+                        # A local fast operation invalidated these pages. Restart only the
+                        # read; this is scheduling progress, not a failed device observation.
+                        continue
+                    raise
                 if (
                     generation != service.generation
                     or driver is not service.business
@@ -98,10 +126,15 @@ class StateSync:
                 "last_success_at": time.time(),
                 "error": None,
             }
+            self.restore_readiness()
             service.changed()
             return snapshot
         except Exception as exc:
-            if generation == service.generation and driver is service.business:
+            if (
+                generation == service.generation
+                and driver is service.business
+                and not service.foreground_pending()
+            ):
                 self.snapshot_failed(exc)
             raise
 

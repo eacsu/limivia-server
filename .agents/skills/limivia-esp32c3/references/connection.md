@@ -18,6 +18,6 @@
 - Linux 常见端口为 `/dev/ttyACM*`，优先通过 `/dev/serial/by-id/` 识别；编号及 VID:PID 不能单独证明板型。
 - 正常复位仍无法连接时，按住 BOOT，再按下并松开 RST，最后松开 BOOT，重新枚举端口。下载模式不提供工作台协议；烧录恢复须切换到固件仓库执行。
 - GPIO18/19 必须保留给 USB，不建议用 eFuse 写入恢复连接。
-- 连接成功后读取 `hello` 和 `state`；浏览器刷新或关闭不停止输出。SDK 0.3.0a3 的显式“结束实验并断开”会清理本连接创建的资源，其他来源的资源不认领、不释放；失败时提示结果待核实。意外传输断开后输出可能继续，恢复时不把页面旧值写回板卡。
+- 连接成功后读取 `hello` 和 `state`；浏览器刷新或关闭不停止输出。SDK 0.3.0a7 的显式“结束实验并断开”会清理本连接创建的资源，其他来源的资源不认领、不释放；失败时提示结果待核实。意外传输断开后输出可能继续，恢复时不把页面旧值写回板卡。
 
-连接模型更新：2026-10-25，SDK 0.3.0a3 / JSON-RPC v3；原硬件观察核验日期：2026-10-21。[Bleak](https://bleak.readthedocs.io/en/latest/)、[pySerial](https://pyserial.readthedocs.io/en/stable/pyserial_api.html)、[乐鑫串口连接](https://docs.espressif.com/projects/esp-idf/en/v6.0.2/esp32c3/get-started/establish-serial-connection.html)。
+连接模型更新：2026-10-26，SDK 0.3.0a7 / JSON-RPC v3；原硬件观察核验日期：2026-10-21。[Bleak](https://bleak.readthedocs.io/en/latest/)、[pySerial](https://pyserial.readthedocs.io/en/stable/pyserial_api.html)、[乐鑫串口连接](https://docs.espressif.com/projects/esp-idf/en/v6.0.2/esp32c3/get-started/establish-serial-connection.html)。

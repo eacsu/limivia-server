@@ -35,6 +35,36 @@ class BusinessConnection:
         self.resources = {}
         self.jobs = {}
         self.snapshot_reader = None
+        self.resource_lookup = None
+
+    def wire_args(self, op, args):
+        """高级入口从现有资源身份补齐 r2 实例，页面无需管理 SDK 实例号。"""
+        args = dict(args)
+
+        def instance(resource_id):
+            owned = self.resources.get(resource_id)
+            info = (
+                owned.info.model_dump(mode="json")
+                if owned and owned.info
+                else (self.resource_lookup(resource_id) if self.resource_lookup else None)
+            )
+            if not info:
+                raise ValueError("资源不在当前快照中，请先刷新状态。")
+            return info["instance"]
+
+        if op in {"resource.call", "resource.close", "resource.recover"}:
+            args.setdefault("instance", instance(args["resource"]))
+        if op in {"resource.open", "resource.preflight", "mux.preflight"} and args.get("parent"):
+            args.setdefault("parent_instance", instance(args["parent"]))
+        if op in {"gpio.group.read", "gpio.group.write", "rmt.sync"}:
+            items = [
+                {"resource": item} if isinstance(item, int) else dict(item)
+                for item in args["resources"]
+            ]
+            for item in items:
+                item.setdefault("instance", instance(item["resource"]))
+            args["resources"] = items
+        return args
 
     async def open(self, args):
         kind, pins, config = args["kind"], args["pins"], dict(args["config"])
@@ -85,7 +115,13 @@ class BusinessConnection:
         if info is None:
             raise RuntimeError("SDK 未提供已确认的资源身份。")
         self.resources[info.id] = resource
-        return {"resource": info.id, "instance": info.instance}
+        initial = resource.initial_state
+        return {
+            "resource": info.id,
+            "instance": info.instance,
+            "info": info.model_dump(mode="json"),
+            **(initial.data if initial else {}),
+        }
 
     async def info(self, resource_id):
         snapshot = await self.snapshot_reader()
@@ -101,7 +137,10 @@ class BusinessConnection:
             if action != "status" or args:
                 raise ValueError("不能操作不属于当前业务连接的资源。")
             return await self.raw_result(
-                "resource.call", resource=resource_id, action="status", args={}
+                "resource.call",
+                resource=resource_id,
+                action="status",
+                args={},
             )
         if action == "status":
             return result_data(await resource.status())
@@ -131,6 +170,7 @@ class BusinessConnection:
 
     async def raw_result(self, op, **args):
         """仅用于没有高层门面的协议诊断和高级 GPIO 组操作。"""
+        args = self.wire_args(op, args)
         prefix, _, method = op.partition(".")
         async with self.board.raw.subscribe() as events:
             request_id = await getattr(getattr(self.board.raw, prefix), method.replace(".", "_"))(
@@ -168,6 +208,8 @@ class BusinessConnection:
         if op == "state.snapshot":
             return result_data(await self.board.state.snapshot())
         if op == "resource.preflight":
+            if args.get("parent"):
+                args = {**args, "parent_instance": (await self.info(args["parent"]))["instance"]}
             return result_data(await self.board.mux.preflight(**args))
         if op == "resource.open":
             return await self.open(args)
@@ -198,8 +240,8 @@ class BusinessConnection:
             method = {"job.get": job.status, "job.cancel": job.cancel, "job.wait": job.wait}[op]
             return result_data(await method())
         prefix, _, method = op.partition(".")
-        if prefix == "gpio" and method.startswith("group."):
-            if method == "group.write":
+        if (prefix == "gpio" and method.startswith("group.")) or op == "rmt.sync":
+            if op != "gpio.group.read":
                 await self.board.control.acquire()
             return await self.raw_result(op, **args)
         facade = getattr(self.board, prefix, None)

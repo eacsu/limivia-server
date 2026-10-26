@@ -297,8 +297,16 @@ export interface DeviceScope {
   boot_id?: string
   operation_epoch?: number
 }
-class WorkbenchAPI {
+export class WorkbenchAPI {
   private scope: DeviceScope = {}
+  private completed = new Map<string, Operation>()
+  private waiters = new Map<string, Set<(task: Operation) => void>>()
+  private operationEvent(task: Operation) {
+    if (!task?.id || !terminal(task)) return
+    this.completed.set(task.id, task)
+    if (this.completed.size > 128) this.completed.delete(this.completed.keys().next().value!)
+    this.waiters.get(task.id)?.forEach((resolve) => resolve(task))
+  }
   deviceScope() {
     return { ...this.scope }
   }
@@ -372,10 +380,47 @@ class WorkbenchAPI {
     })
   }
   async wait(task: Operation): Promise<Operation> {
+    const matches = (event: Operation) =>
+      event.generation === task.generation && event.boot_id === task.boot_id
     let current = task
-    while (!terminal(current)) {
-      await new Promise((r) => setTimeout(r, 150))
-      current = await this.request<Operation>('/api/operations/' + task.id)
+    if (!terminal(current)) {
+      const cached = this.completed.get(task.id)
+      if (cached && matches(cached)) current = cached
+    }
+    if (!terminal(current)) {
+      current = await new Promise<Operation>((resolve, reject) => {
+        let settled = false
+        let timer: ReturnType<typeof setTimeout>
+        const listeners = this.waiters.get(task.id) ?? new Set()
+        const cleanup = () => {
+          settled = true
+          clearTimeout(timer)
+          listeners.delete(finish)
+          if (!listeners.size) this.waiters.delete(task.id)
+        }
+        const finish = (event: Operation) => {
+          if (settled || !matches(event) || !terminal(event)) return
+          cleanup()
+          resolve(event)
+        }
+        const watchdog = async () => {
+          if (settled) return
+          try {
+            finish(await this.request<Operation>('/api/operations/' + task.id))
+          } catch (error) {
+            if (!settled) {
+              cleanup()
+              reject(error)
+            }
+          }
+          if (!settled) timer = setTimeout(watchdog, 1000)
+        }
+        listeners.add(finish)
+        this.waiters.set(task.id, listeners)
+        timer = setTimeout(watchdog, 1000)
+        const early = this.completed.get(task.id)
+        if (early) finish(early)
+      })
     }
     if (current.status !== 'completed' || current.result_expired)
       throw new Error(
@@ -440,6 +485,8 @@ class WorkbenchAPI {
               boot_id: feed.data.identity.boot_id,
               operation_epoch: feed.data.operation_epoch,
             }
+          if (feed.type === 'operation') this.operationEvent(feed.data as Operation)
+          feed.operations?.forEach((task: Operation) => this.operationEvent(task))
           onFeed(feed)
           if (feed.type === 'wiring.changed')
             window.dispatchEvent(new CustomEvent('wiring-changed', { detail: feed.data }))

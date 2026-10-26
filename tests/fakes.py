@@ -14,7 +14,7 @@ from limivia.types import Operation
 HELLO = {
     "protocol": 3,
     "jsonrpc": "2.0",
-    "contract": "limivia-v3-jsonrpc2",
+    "contract": "limivia-v3-jsonrpc2-r2",
     "batch_max": 8,
     "sequence_window": 64,
     "sequence_high": 0,
@@ -400,6 +400,36 @@ class FakeTransport:
                 }
         else:
             result = {}
+        info = self.resources.get(result.get("resource"))
+        if (
+            op in {"resource.open", "resource.call"}
+            and info
+            and (
+                info["kind"] == "gpio"
+                and action in {"open", "read", "write", "status"}
+                or info["kind"] == "pwm"
+                and action in {"duty", "status"}
+            )
+        ):
+            config = info["definition"]["config"]
+            confirmed = {
+                "resource": info["id"],
+                "instance": info["instance"],
+                "revision": 1,
+                "observed_us": 1000,
+                "enabled": True,
+            }
+            if info["kind"] == "gpio":
+                confirmed.update(
+                    mode=config.get("mode", "input"), level=self.levels.get(info["id"], 0)
+                )
+            else:
+                confirmed["duty_percent"] = float(
+                    p.get("args", {}).get("duty", config.get("duty", 0))
+                )
+            if action == "open":
+                confirmed["info"] = copy.deepcopy(info)
+            result = confirmed
         response = {"id": command["id"], "ok": True, "result": result}
         if self.bad_response:
             response = self.bad_response(response)

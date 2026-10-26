@@ -92,7 +92,6 @@ export function LedPanel({
     const run = (op: string, args: Args = {}) => api.run(op, args, scope)
     const kind = mode === 'switch' ? 'gpio' : 'pwm'
     await transact(async () => {
-      let id = r?.id
       if (r && r.kind !== kind) {
         await run('resource.close', { resource: r.id })
         setInvalidatedKey(resourceKey)
@@ -106,10 +105,10 @@ export function LedPanel({
               ? { mode: 'output', level: 1 }
               : { frequency: 1000, resolution: 10, duty, breath_ms: 2000 },
         }
-        await run('resource.preflight', draft)
         const result = await run('resource.open', draft)
-        id = Number(result.job?.resource ?? result.result?.resource)
+        const id = Number(result.job?.resource ?? result.result?.resource)
         if (!id) throw new Error('未收到 LED 资源句柄。')
+        if (kind === 'pwm') await run('resource.call', { resource: id, action: 'status', args: {} })
       } else {
         await run('resource.call', {
           resource: r.id,
@@ -117,7 +116,6 @@ export function LedPanel({
           args: kind === 'gpio' ? { level: on ? 0 : 1 } : { duty },
         })
       }
-      await run('resource.call', { resource: id!, action: 'status', args: {} })
       setFeedback('操作已确认，已读取设备输出状态。')
     })
   }

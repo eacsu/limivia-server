@@ -64,7 +64,7 @@ def test_observer_connection_identity_discovery_and_catalog(api):
     assert client.get("/api/device/discover").json()["kind"] == "ble"
     assert client.get("/api/device/discover?kind=ws").status_code == 422
     state = connect(client)
-    assert state["identity"]["contract"] == "limivia-v3-jsonrpc2"
+    assert state["identity"]["contract"] == "limivia-v3-jsonrpc2-r2"
     assert state["snapshot"]["revision"] == 1
     assert "control" not in state
     assert len(client.get("/api/device/catalog").json()) == len(OPERATIONS) == 76
@@ -268,8 +268,8 @@ def test_explicit_job_cancel_uses_real_job_identity(api):
             "job.submit",
             {
                 "command": {
-                    "type": "resource.open",
-                    "params": {"kind": "gpio", "pins": {"pin": 0}, "config": {}},
+                    "type": "system.time",
+                    "params": {},
                 }
             },
         ),
@@ -533,7 +533,12 @@ def test_result_expired_and_response_capacity(api):
     ready(client)
     backend.connection.result_expired = True
     opened = completed(
-        client, command(client, "resource.open", {"kind": "gpio", "pins": {"pin": 0}, "config": {}})
+        client,
+        command(
+            client,
+            "resource.open",
+            {"kind": "pwm", "pins": {"pin": 0}, "config": {"frequency": 1000}},
+        ),
     )
     assert opened["status"] == "unknown" and opened["result_expired"]
     backend.connection.result_expired = False
@@ -559,10 +564,13 @@ def test_result_expired_and_response_capacity(api):
     )
     assert failed["status"] == "unknown" and failed["external_effect_possible"]
     assert len([c for c in backend.connection.commands if c["op"] == "resource.call"]) <= 1
-    assert not any(
-        c["op"] == "resource.call" and c["params"].get("action") == "write"
-        for c in backend.connection.commands
-    )
+    assert (
+        sum(
+            c["op"] == "resource.call" and c["params"].get("action") == "write"
+            for c in backend.connection.commands
+        )
+        == 1
+    )  # Unknown direct result never causes a write replay.
 
 
 def test_revision_zero_is_not_ignored(api, monkeypatch):
@@ -789,7 +797,12 @@ def test_expired_result_query_never_fabricates_original_completion(api):
     ready(client)
     backend.connection.result_expired = True
     task = completed(
-        client, command(client, "resource.open", {"kind": "gpio", "pins": {"pin": 0}, "config": {}})
+        client,
+        command(
+            client,
+            "resource.open",
+            {"kind": "pwm", "pins": {"pin": 0}, "config": {"frequency": 1000}},
+        ),
     )
     assert task["status"] == "unknown" and task["result_expired"]
     completed(client, command(client, "job.get", {"job_id": task["job_id"]}))
@@ -1037,3 +1050,51 @@ def test_observer_reads_output_status_without_control_or_output_changes(api, kin
         c["op"] in {"control.acquire", "resource.open", "resource.close"}
         for c in backend.connection.commands[before:]
     )
+
+
+def test_batch_gpio_write_fills_instance_and_applies_confirmed_state(api):
+    client, backend, _, _ = api
+    connect(client)
+    ready(client)
+    opened = completed(
+        client,
+        command(
+            client,
+            "resource.open",
+            {"kind": "gpio", "pins": {"pin": 13}, "config": {"mode": "output", "level": 1}},
+        ),
+    )
+    resource = opened["result"]["resource"]
+    before = len(backend.connection.commands)
+    response = client.post(
+        "/api/device/batches",
+        json=[
+            {
+                "op": "resource.call",
+                "args": {"resource": resource, "action": "write", "args": {"level": 0}},
+            }
+        ],
+    )
+    assert response.status_code == 202, response.text
+    task = completed(client, response.json()[0])
+    assert task["status"] == "completed"
+    sent = [c for c in backend.connection.commands[before:] if c["op"] == "resource.call"]
+    assert len(sent) == 1 and sent[0]["params"]["instance"] == resource
+    assert client.get("/api/device").json()["resource_observations"][str(resource)]["level"] == 0
+
+
+def test_sdk_connection_error_is_not_replaced_by_generic_prompt(api, monkeypatch):
+    from limivia import DeviceConnectionError
+
+    client, backend, _, _ = api
+
+    async def unavailable():
+        raise DeviceConnectionError("BLE GATT 建连失败：controller link failed")
+
+    monkeypatch.setattr(backend.connection, "open", unavailable)
+    assert (
+        client.post("/api/device/connect", json={"kind": "usb", "target": "test"}).status_code
+        == 202
+    )
+    state = until(client, "/api/device", lambda s: s["status"] == "disconnected")
+    assert "controller link failed" in state["error"]

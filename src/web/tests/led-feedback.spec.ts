@@ -68,6 +68,10 @@ for (const theme of ['vallum', 'abyssus'])
         await expect(led.getByRole('heading', { name: '已熄灭', exact: true })).toBeVisible()
         await expect(led.getByRole('button', { name: '点亮 LED', exact: true })).toBeEnabled()
       }
+      // Let the final confirmed render reach the geometry sampler before stopping RAF.
+      await page.evaluate(
+        () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+      )
       const samples = await page.evaluate(() =>
         (
           window as unknown as {

@@ -321,34 +321,32 @@ def test_failed_automatic_batch_acquire_does_not_leave_inflight_count(observatio
     assert service.batches_inflight == 0
 
 
-def test_open_is_not_completed_before_its_snapshot_is_published(observation_api, monkeypatch):
+def test_gpio_open_publishes_confirmed_state_without_waiting_for_snapshot(
+    observation_api, monkeypatch
+):
     import asyncio
 
-    client, _, service, _ = observation_api
+    client, backend, service, _ = observation_api
     connect(client)
-    original = service.sync.snapshot
 
     async def exercise():
-        started, release = asyncio.Event(), asyncio.Event()
+        async def blocked(**_kwargs):
+            await asyncio.Event().wait()
 
-        async def slow(**_kwargs):
-            started.set()
-            await release.wait()
-            return await original()
-
-        monkeypatch.setattr(service.sync, "snapshot", slow)
+        monkeypatch.setattr(service.sync, "snapshot", blocked)
+        before = len(backend.connection.commands)
         task = await service.submit(
             "resource.open",
             {"kind": "gpio", "pins": {"pin": 10}, "config": {"mode": "output", "level": 1}},
             internal=True,
         )
-        await started.wait()
-        assert task["status"] == "running"
-        assert not service.state["snapshot"]["resources"]
-        release.set()
-        result = await service.wait(task["id"])
+        result = await asyncio.wait_for(service.wait(task["id"]), 1)
         assert result["status"] == "completed"
-        assert service.sync.resource(result["result"]["resource"])
+        info = service.sync.resource(result["result"]["resource"])
+        assert info and info["state"] == "ready"
+        assert service.resource_observations[str(info["id"])]["level"] == 1
+        sent = [c["op"] for c in backend.connection.commands[before:]]
+        assert sent == ["control.acquire", "resource.open"]
 
     client.portal.call(exercise)
 
@@ -465,6 +463,36 @@ def test_background_snapshot_adapts_to_confirmed_pagination_latency(observation_
     client.portal.call(exercise)
 
 
+def test_initial_snapshot_late_success_restores_readiness(observation_api, monkeypatch):
+    import asyncio
+
+    client, _, service, _ = observation_api
+    connect(client)
+    original = service.connection.state.snapshot
+    service.job_timeout = 0.02
+
+    async def exercise():
+        release = asyncio.Event()
+
+        async def slow():
+            await release.wait()
+            return await original()
+
+        monkeypatch.setattr(service.connection.state, "snapshot", slow)
+        await service._initialise(service.generation, refresh=True)
+        assert service.state["status"] == "discovery_failed"
+        assert service.state["stale"]
+        await service._initialise(service.generation - 1)
+        release.set()
+        await service.sync.snapshot_task
+        assert service.state["status"] == "ready"
+        assert not service.state["stale"]
+        assert service.state["error"] is None
+        assert service.state["snapshot_sync"]["state"] == "current"
+
+    client.portal.call(exercise)
+
+
 def test_foreground_open_waits_for_inflight_snapshot_and_defers_background_refresh(
     observation_api, monkeypatch
 ):
@@ -500,5 +528,38 @@ def test_foreground_open_waits_for_inflight_snapshot_and_defers_background_refre
         await query
         assert (await service.wait(task["id"]))["status"] == "completed"
         assert not service.foreground_pending()
+
+    client.portal.call(exercise)
+
+
+def test_local_fast_operation_restarts_expired_pages_without_marking_failure(
+    observation_api, monkeypatch
+):
+    import asyncio
+    from types import SimpleNamespace
+
+    client, _, service, _ = observation_api
+    connect(client)
+    original = service.connection.state.snapshot
+    calls = 0
+
+    class Expired(Exception):
+        error = SimpleNamespace(reason="snapshot_expired")
+
+    async def changed():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            service.sync.foreground_version += 1
+            raise Expired()
+        return await original()
+
+    async def exercise():
+        monkeypatch.setattr(service.connection.state, "snapshot", changed)
+        await asyncio.wait_for(service.sync.snapshot(), 1)
+        assert calls == 2
+        assert service.sync.snapshot_failed_at is None
+        assert service.state["snapshot_sync"]["state"] == "current"
+        assert service.state["snapshot_sync"]["error"] is None
 
     client.portal.call(exercise)
