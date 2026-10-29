@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react'
-import { ControlAction } from './ControlAction'
 import { Board } from './Board'
 import { Dialog } from './WorkbenchUI'
 import { Action, Result } from './Forms'
@@ -73,12 +72,6 @@ export default function App() {
     setSection(next)
   }
   const task = selected ? (tasks.find((t) => t.id === selected.id) ?? selected) : null
-  const control =
-    state.control.mine && state.control.held
-      ? '已取得控制'
-      : state.control.held
-        ? '其他页面控制中'
-        : '观察模式'
   return (
     <>
       <a className="skip-link" href="#main">
@@ -106,14 +99,12 @@ export default function App() {
             <span className="connection-status">
               {online ? statusNames[state.status] : '后端实时通道离线'}
             </span>
-            <span className="control-status">{control}</span>
             <div className="flex-space" />
             {state.identity && (
               <Action
                 disabled={!online}
                 run={async () => {
-                  if (confirm('停止所有来源的实验并持久禁止自启？需要等待设备清理与持久化确认。'))
-                    await api.request('/api/device/stop', 'POST')
+                  await api.request('/api/device/stop', 'POST')
                 }}
               >
                 停止所有实验
@@ -276,8 +267,9 @@ export default function App() {
           <p>
             operation {task.id}
             <br />
-            SDK request {task.request_id ?? '未提交'} · job {task.job_id ?? '无'} · 连接代次{' '}
-            {task.generation}
+            {task.request_id != null && <>SDK request {task.request_id} · </>}
+            {task.job_id != null && <>job {task.job_id} · </>}
+            连接代次 {task.generation}
           </p>
           {task.result_expired && <p>已知作业状态，但结果内容已过期。</p>}
           {(task.external_effect_possible || task.error?.may_have_executed) && (
@@ -351,20 +343,18 @@ function Connection({ state }: { state: DeviceState }) {
   const active = state.status !== 'disconnected'
   return (
     <>
-      <p>设备位于服务主机。连接后先读取能力，页面刷新不会自动申请控制。</p>
+      <p>设备位于服务主机。连接完成后即可操作，多个页面共享同一连接。</p>
       {active ? (
         <>
           <p>
             {statusNames[state.status]} · {state.kind.toUpperCase()}
           </p>
-          <ControlAction state={state} />
           <Action
             run={async () => {
-              if (confirm('断开后板上资源和流程可能继续运行。确认仅断开连接？'))
-                await api.request('/api/device/disconnect', 'POST')
+              await api.request('/api/device/disconnect', 'POST')
             }}
           >
-            断开设备连接
+            结束实验并断开
           </Action>
         </>
       ) : (
@@ -526,8 +516,7 @@ function OTA({ state, enabled }: { state: DeviceState; enabled: boolean }) {
       <Action
         disabled={!enabled || !file}
         run={async () => {
-          if (confirm('将镜像上传到非活动槽并校验、设置下次启动槽？本次不会重启。'))
-            setResult(await api.upload(file!, 'firmware.bin', false, state.identity!.profile))
+          setResult(await api.upload(file!, 'firmware.bin', false, state.identity!.profile))
         }}
       >
         上传并校验镜像

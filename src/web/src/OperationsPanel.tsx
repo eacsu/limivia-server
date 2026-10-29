@@ -141,35 +141,19 @@ export function OperationForm({
         {item.group} · {item.op}
       </p>
       {!available && <p>当前发现结果未确认此功能可用，请重新读取能力或切换支持的镜像。</p>}
-      <Fields fields={operationFields(item)} value={args} onChange={setArgs} />
-      {item.confirmation && (
-        <p className="notice">
-          此操作会清空设备持久数据。确认文字：<code>{item.confirmation}</code>
-        </p>
-      )}
+      <Fields
+        fields={operationFields(item).filter((field) => !item.confirmation || field.name !== 'confirm')}
+        value={args}
+        onChange={setArgs}
+      />
       <Action
         primary
         disabled={!available || (!item.observer && !enabled)}
         run={async () => {
-          if (item.confirmation && args.confirm !== item.confirmation)
-            throw new Error('请填写准确的确认文字。')
-          if (
-            [
-              'system.restart',
-              'power.sleep',
-              'wifi.disconnect',
-              'wifi.maintenance',
-              'wifi.configure',
-              'mqtt.configure',
-              'flow.remove',
-              'storage.delete',
-              'storage.format',
-              'system.nvs_format',
-            ].includes(item.op) &&
-            !confirm('确认执行此操作？它可能改变设备状态、删除数据或中断连接。')
+          const task = await api.run(
+            item.op,
+            item.confirmation ? { ...args, confirm: item.confirmation } : args,
           )
-            return
-          const task = await api.run(item.op, args)
           setResult(task.result ?? task.job)
         }}
       >
@@ -360,12 +344,6 @@ export function NetworkPanel({
                 primary
                 disabled={!enabled || !ssid || !supports('wifi.configure')}
                 run={async () => {
-                  if (!password && !confirm('确认连接无密码的开放网络？')) return
-                  if (
-                    ['ws', 'mqtt'].includes(state.kind) &&
-                    !confirm('网络重配置可能切断当前传输，之后需重新选择设备目标。继续？')
-                  )
-                    return
                   const result = await api.run('wifi.configure', { ssid, password, persist })
                   setPassword('')
                   setWifi(result.result)

@@ -1,16 +1,35 @@
 .board-main {
+  padding: 12px 24px;
   overflow: hidden;
 }
 .board-main > .page-heading,
+.board-workbench-heading {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 24px;
+  margin-bottom: 12px;
+}
+.board-workbench-heading > .page-heading {
+  flex: 0 0 110px;
+  margin: 0;
+}
+.board-workbench-heading > .wiring-toolbar {
+  flex: 1;
+  min-width: 0;
+}
+.wiring-toolbar .action-wrap > button {
+  width: 100px;
+}
 .wiring-toolbar {
   flex-shrink: 0;
 }
 .wiring-toolbar {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 16px;
-  margin-bottom: 16px;
+  margin-bottom: 0;
 }
 .wiring-toolbar label {
   display: flex;
@@ -20,6 +39,11 @@
 .wiring-toolbar input {
   width: 220px;
   min-width: 0;
+  height: 32px;
+  padding: 4px 12px;
+  font-size: 14px;
+  line-height: 21px;
+  color: var(--text-secondary);
 }
 .wiring-toolbar > span {
   font-size: 13px;
@@ -27,7 +51,7 @@
 .board-workspace {
   flex: 1;
   min-height: 0;
-  max-height: calc(100dvh - 260px);
+  max-height: none;
   display: grid;
   grid-template-columns: minmax(288px, 1fr) 400px;
   gap: 24px;
@@ -44,15 +68,19 @@
 .board-inspector {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 6px;
   padding: 0 16px;
   border-left: 1px solid var(--border);
   background: var(--surface);
   overflow: hidden;
 }
 .inspector-identity {
-  flex: 0 0 64px;
-  min-height: 64px;
+  flex: 0 0 52px;
+  min-height: 52px;
+}
+.inspector-identity:has(.inspector-function-back) {
+  flex-basis: 84px;
+  min-height: 84px;
 }
 .inspector-identity h2 {
   font-size: 16px;
@@ -204,19 +232,17 @@
 .board-selection-help {
   padding: 0;
 }
-.board .grouped-pin .pin-pad {
-  stroke: var(--focus);
-  stroke-width: 2;
-}
 .board .grouped-pin text {
   font-weight: 500;
 }
 .board .assigned-pin .pin-hit {
   fill: var(--hover);
+}
+.board .assigned-pin .pin-outline {
   stroke: var(--border-strong);
   stroke-dasharray: 3 2;
 }
-.board .grouped-pin .pin-hit {
+.board .grouped-pin .pin-outline {
   stroke: var(--focus);
   stroke-width: 2;
   stroke-dasharray: none;
@@ -226,7 +252,7 @@
 }
 .board-main > .diagnostic-bar {
   flex-shrink: 0;
-  margin-top: 16px;
+  margin-top: 12px;
   padding-top: 0;
   min-height: 24px;
 }
@@ -264,7 +290,7 @@
 }
 .embedded-led .led-output-state h3 {
   font-size: 22px;
-  line-height: 30px;
+  line-height: 32px;
   text-wrap: wrap;
 }
 .embedded-led .led-indicator {
@@ -277,14 +303,18 @@
 }
 .embedded-led .led-indicator::before {
   content: '';
-  width: 8px;
-  height: 8px;
-  border: 1px solid var(--text-secondary);
-  border-radius: 50%;
+  width: 10px;
+  height: 10px;
+  background: url('./assets/figma/pin-state/led-ring-vallum.svg') center / 10px 10px no-repeat;
+}
+[data-theme='abyssus'] .embedded-led .led-indicator::before {
+  background-image: url('./assets/figma/pin-state/led-ring-abyssus.svg');
 }
 .embedded-led .led-indicator.on::before,
 .embedded-led .led-indicator.breath::before {
   background: var(--accent-strong);
+  border: 1px solid var(--text-secondary);
+  border-radius: 50%;
 }
 .embedded-led .led-mode-row {
   gap: 8px;
@@ -304,6 +334,13 @@
 .embedded-led .led-actions > .action-wrap button {
   width: 104px;
   padding-inline: 4px;
+}
+.embedded-led .led-actions > .action-wrap:not(:first-child) button {
+  width: 96px;
+}
+.embedded-led .led-actions > .action-wrap:nth-child(2) button {
+  border-color: transparent;
+  background: transparent;
 }
 .embedded-led .led-actions > .action-wrap:last-child button {
   border: 1px solid var(--border);
@@ -439,4 +476,11 @@
   .embedded-led .led-actions {
     flex-wrap: wrap;
   }
+}
+
+@media (max-width: 999px) {
+  .board-main { padding: 16px; }
+  .board-workbench-heading { flex-direction: column; align-items: stretch; gap: 12px; }
+  .board-workbench-heading > .page-heading { flex-basis: auto; }
+  .wiring-toolbar { flex-wrap: wrap; }
 }

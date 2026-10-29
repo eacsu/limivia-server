@@ -260,10 +260,10 @@ async def start_upload(service, file, name, page, *, secret=False, profile=None)
     filename(name)
     prefix = "ota" if profile is not None else "storage"
     service.authorize(prefix + ".begin", page)
-    generation = service.generation
+    generation, epoch = service.generation, service.operation_epoch
     data = await file.read(16 * 1024 * 1024 + 1)
     await file.close()
-    if generation != service.generation:
+    if generation != service.generation or epoch != service.operation_epoch:
         raise HTTPException(409, "连接代次已改变，请重新核对上传目标。")
     service.authorize(prefix + ".begin", page)
     if not data or len(data) > 16 * 1024 * 1024:
@@ -292,12 +292,12 @@ async def start_upload(service, file, name, page, *, secret=False, profile=None)
         },
     )
     service.save(task)
-    service.spawn(upload_bytes(service, task, data, name, page, prefix, secret, profile))
+    service.spawn(upload_bytes(service, task, data, name, page, epoch, prefix, secret, profile))
     return task
 
 
 async def upload_bytes(
-    service, task, data, name, page, prefix="storage", secret=False, profile=None
+    service, task, data, name, page, epoch, prefix="storage", secret=False, profile=None
 ):
     upload_id = None
     try:
@@ -308,7 +308,7 @@ async def upload_bytes(
             args.update(board=service.state["identity"]["board"], protocol=3, profile=profile)
 
         async def run(op, params):
-            if task["generation"] != service.generation:
+            if task["generation"] != service.generation or epoch != service.operation_epoch:
                 raise HTTPException(409, "连接代次已改变，上传不能继续。")
             return await service.execute(op, params, page, parent=task["id"])
 
@@ -349,12 +349,7 @@ async def upload_bytes(
                 "may_have_executed": unknown,
             },
         )
-        if (
-            upload_id
-            and not unknown
-            and task["generation"] == service.generation
-            and service.owner == page
-        ):
+        if upload_id and not unknown and task["generation"] == service.generation:
             try:
                 await service.execute(
                     prefix + ".abort", {"upload_id": upload_id}, page, parent=task["id"]

@@ -37,6 +37,7 @@ def main():
             options = await request.json()
             for key in (
                 "hold_jobs",
+                "notification_gaps",
                 "cleanup_fault",
                 "fail_chunk",
                 "result_expired",

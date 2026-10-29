@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { reset, connect, selectPin, openResource } from './helpers'
+import { reset, connect, selectPin, openResource, saveGpio } from './helpers'
 
 for (const width of [1280, 1440])
   for (const theme of ['vallum', 'abyssus'])
@@ -11,21 +11,20 @@ for (const width of [1280, 1440])
       await selectPin(page, 'R11')
       const board = page.locator('.board-stage .board-viewport > svg.board')
       await expect(board.locator('.pin')).toHaveCount(32)
-      await expect(board).toHaveAttribute('data-size', width === 1280 ? 'short' : 'regular')
+      await expect(board).toHaveAttribute('data-size', 'regular')
       const box = await board.boundingBox()
-      expect(box?.height).toBe(width === 1280 ? 388 : 480)
+      expect(box?.height).toBe(480)
       expect(box?.width).toBe(360)
       await expect(board.locator('.pin text').first()).toHaveCSS('font-size', '13px')
       for (const pin of await board.locator('.pin').all()) {
         await expect(pin).toBeInViewport({ ratio: 0.999 })
         await expect(pin.locator('.pin-hit')).toHaveAttribute('height', '24')
       }
-      await expect(page.locator('.board-stage > .board-wrap > .board-legend')).toHaveCount(1)
-      await expect(page.locator('.board-stage > .board-wrap > .board-legend > span')).toHaveCount(6)
+      await expect(page.locator('.board-stage > .board-wrap > .board-legend')).toHaveCount(0)
       await expect(page.locator('.board-stage > .board-wrap > .board-detail')).toHaveCount(0)
       expect(
         await page.locator('.inspector-identity').evaluate((n) => n.getBoundingClientRect().height),
-      ).toBe(64)
+      ).toBe(52)
       expect(
         await page
           .locator('.inspector-diagnostics')
@@ -77,7 +76,9 @@ test('真实十二项能力收纳为八家族，展开互斥、键盘可达且�
   const commands = (await (await page.request.get('/api/testing/commands')).json()).commands.slice(
     before,
   )
-  expect(commands).toEqual([])
+  expect(commands.filter((c: { op: string }) => !['state', 'session.ping'].includes(c.op))).toEqual(
+    [],
+  )
 })
 
 test('窄屏重排保留字号、命中区和说明入口，返回后可从引脚列表选择', async ({ page }) => {
@@ -89,8 +90,8 @@ test('窄屏重排保留字号、命中区和说明入口，返回后可从引�
   await expect(board).toHaveAttribute('viewBox', '0 0 288 388')
   await expect(board.locator('.pin text').first()).toHaveCSS('font-size', '13px')
   await expect(board.locator('.pin-hit').first()).toHaveAttribute('height', '24')
-  await page.getByRole('button', { name: '说明', exact: true }).click()
-  await expect(page.getByRole('dialog', { name: '接线图说明' })).toContainText('不代表物理输出')
+  await page.getByRole('button', { name: '图例', exact: true }).click()
+  await expect(page.getByRole('dialog', { name: '图形含义 · 空闲时不显示图标' })).toContainText('实心与空心表示高／低')
   await page.keyboard.press('Escape')
   await page.getByRole('button', { name: '接线与引脚列表', exact: true }).click()
   await page
@@ -106,12 +107,13 @@ test('从其他引脚切回侧栏接线组时，板图选中与详情保持一�
   await reset(page)
   await connect(page)
   await openResource(page, 'GPIO')
+  await saveGpio(page)
   await selectPin(page, 'R11')
   await page
     .getByRole('navigation')
-    .getByRole('button', { name: /^GPIO GPIO · 方案待应用$/ })
+    .getByRole('button', { name: /^GPIO\d* GPIO · 方案待应用$/ })
     .click()
-  await expect(page.locator('.inspector-identity h2')).toHaveText('GPIO')
+  await expect(page.locator('.inspector-identity h2')).toHaveText('GPIO4')
   const board = page.locator('.board-stage .board-viewport > svg.board')
   await expect(board.locator('[data-pin-id="R12"]')).toHaveAttribute('aria-pressed', 'true')
   await expect(board.locator('[data-pin-id="R11"]')).toHaveAttribute('aria-pressed', 'false')

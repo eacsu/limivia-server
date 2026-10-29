@@ -4,7 +4,7 @@
 
 ## 安装与客户端
 
-按 README 先安装服务依赖，再通过项目 `.venv` 的 pip 安装已核验的 SDK 0.3.0a1 wheel。本轮按用户要求从 TOML/Poetry 锁中移除 limivia。相同版本的历史自定义 v3 wheel 不兼容，核对 `doctor` 的导入位置、来源 SHA256 和 `limivia-v3-jsonrpc2`。
+按 README 先安装服务依赖，再通过项目 `.venv` 的 pip 安装已核验的 SDK 0.3.0a3 wheel。本轮按用户要求从 TOML/Poetry 锁中移除 limivia。相同版本的历史自定义 v3 wheel 不兼容，核对 `doctor` 的导入位置、来源 SHA256 和 `limivia-v3-jsonrpc2`。
 
 重新构建前端并整页刷新浏览器。旧 `/api/device/connect` WebSocket、`v/id/op/params` 帧、session/control 字段和按字符串 error.code 分支均失效；新客户端使用 HTTP 业务任务和 `/api/device/events` 类型化消息。
 
@@ -13,8 +13,8 @@
 |旧行为|新行为|
 |---|---|
 |每页面占有 SDK 会话，页面退出关闭链路|服务生命周期持有单设备连接，多页面观察|
-|连接时申请控制|连接仅发现能力，用户显式取得控制|
-|浏览器等待单条 RPC 完成|202 operation ID；submitted→accepted→job/直接 RPC 终态|
+|连接时申请控制|连接后即可使用，SDK 在写入前自动协调协议令牌|
+|浏览器等待单条 RPC 完成|202 operation ID；普通业务 running→高层接口确认终态，显式 Job/高级批量保留真实作业语义|
 |gpio.set/pwm.set/adc.start 等按引脚命令|resource.preflight/open→call→close/recover，句柄来自设备结果|
 |单页 state 当完整状态|SDK state.snapshot 一致分页；revision=0 也检查|
 |采样通知即样本|data.available 仅提示，显式协调队列读取|

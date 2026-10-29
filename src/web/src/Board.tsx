@@ -1,10 +1,16 @@
 import { useEffect, useId, useRef, useState } from 'react'
-import type { Snapshot } from './device'
-import { BOARD_PINS, displaySide, type BoardFace, type BoardPin } from './board'
+import { pinStateLabel, type Snapshot } from './device'
+import { BOARD_PINS, displaySide, type BoardFace, type BoardPin } from './boardPins'
+import { PinStateIcon } from './PinStateIcon'
+import { pinStateGlyph, type PinGlyph } from './pinState'
+import ledMarkLight from './assets/figma/pin-state/led-mark-vallum.svg'
+import ledMarkDark from './assets/figma/pin-state/led-mark-abyssus.svg'
+import d5Light from './assets/figma/pin-state/board-d5-vallum.svg'
+import d5Dark from './assets/figma/pin-state/board-d5-abyssus.svg'
+import d4Light from './assets/figma/pin-state/board-d4-vallum.svg'
+import d4Dark from './assets/figma/pin-state/board-d4-abyssus.svg'
 import antenna from './assets/figma/compact-antenna.svg'
 import antennaNarrow from './assets/figma/compact-antenna-narrow.svg'
-
-const LED_MARK_PATH = 'M1 9h3m7 0h4M4 6v6l6-3-6-3Zm6 0v6M8 4l3-3m-2 0h2v2M11 6l3-3m-2 0h2v2'
 
 export function Board({
   state,
@@ -18,6 +24,7 @@ export function Board({
   physicalLabels = {},
   onCloseDiagram,
   onInternal,
+  selectedStatus,
 }: {
   state: Snapshot | null
   selected: number
@@ -30,6 +37,7 @@ export function Board({
   embedded?: boolean
   onCloseDiagram?: () => void
   onInternal?: () => void
+  selectedStatus?: string
 }) {
   const [face, setFace] = useState<BoardFace>('front')
   const [inspected, setInspected] = useState<BoardPin | null>(null)
@@ -97,15 +105,6 @@ export function Board({
         aria-label={`合宙 CORE ESP32-C3 ${front ? '正面' : '背面'}接线图，32 个引脚，USB 在下`}
       >
         <defs>
-          <pattern
-            id={`${boardId}-${view}-protected`}
-            patternUnits="userSpaceOnUse"
-            width="4"
-            height="4"
-            patternTransform="rotate(45)"
-          >
-            <path className="pin-protection-stripe" d="M0 0V4" />
-          </pattern>
           <mask id={`${boardId}-${view}-antenna`} style={{ maskType: 'alpha' }}>
             <image
               href={narrow ? antennaNarrow : antenna}
@@ -187,19 +186,11 @@ export function Board({
                       fill="transparent"
                     />
                   )}
-                  <circle
-                    className={
-                      ready &&
-                      (i === 0
-                        ? state?.pins.find((p) => p.pin === 13)?.level === 1
-                        : state?.sessions.some((s) => s.active))
-                        ? 'led active'
-                        : 'led'
-                    }
-                    cx={x + 20}
-                    cy={ledY + 9}
-                    r="5"
-                  />
+                  <image className="pin-icon-light" href={i === 0 ? d5Light : d4Light} x={x + 15} y={ledY + 4} width="10" height="10" />
+                  <image className="pin-icon-dark" href={i === 0 ? d5Dark : d4Dark} x={x + 15} y={ledY + 4} width="10" height="10" />
+                  {ready && (i === 0 ? state?.pins.find((p) => p.pin === 13)?.level === 1 : state?.sessions.some((session) => session.active)) && (
+                    <circle className="led active" cx={x + 20} cy={ledY + 9} r="5" />
+                  )}
                   <text className="board-small" x={x + 20} y={ledY + 34} textAnchor="middle">
                     {label}
                   </text>
@@ -220,17 +211,25 @@ export function Board({
           const right = displaySide(pin, face) === 'right'
           const y = rowStart + pin.row * rowStep
           const padX = right ? edge + pcbWidth : edge - 16
+          const current = state?.pins.find((p) => p.pin === pin.gpio)
+          const status = pinStateLabel(current, narrow)
+          const glyph = pin.protected ? 'lock' : pin.gpio === undefined ? null : pinStateGlyph(current)
+          const flipped = current?.mode === 'input' ? right : !right
           return (
             <g
               key={pin.id}
               role="button"
               tabIndex={0}
-              aria-label={`${pin.id} ${pin.label}${pin.gpio === undefined ? '' : ` GPIO ${pin.gpio}`}，${pin.description}${physicalLabels[pin.id] ? ` · ${physicalLabels[pin.id]}` : ''}`}
+              aria-label={`${pin.id} ${pin.label}${pin.gpio === undefined ? '' : ` GPIO ${pin.gpio}`}，${pin.description}${pin.gpio !== undefined && !pin.protected ? `，${status.full}` : ''}${physicalLabels[pin.id] ? ` · ${physicalLabels[pin.id]}` : ''}`}
               aria-pressed={!!(detail.id === pin.id && (inspected || selected >= 0))}
               data-pin-id={pin.id}
               data-side={right ? 'right' : 'left'}
               data-category={pin.category}
+              data-pin-mode={current?.mode ?? 'idle'}
+              data-pin-level={current?.level ?? 'unknown'}
+              data-pin-quality={current?.quality ?? 'unknown'}
               data-protected={pin.protected}
+              data-pin-symbol={glyph ?? 'empty'}
               className={`pin pin-${pin.category}${pin.gpio === selected ? ' selected-pin' : ''}${detail.id === pin.id && (inspected || selected >= 0) ? ' inspected-pin' : ''}${(pin.gpio !== undefined && pinLabels[pin.gpio]) || physicalLabels[pin.id] ? ' assigned-pin' : ''}${physicalHighlights.includes(pin.id) || (pin.gpio !== undefined && highlighted.includes(pin.gpio)) ? ' grouped-pin' : ''}`}
               onClick={() => choose(pin)}
               onKeyDown={(e) => {
@@ -240,14 +239,11 @@ export function Board({
                 }
               }}
             >
-              <title>
-                {pin.description}
-                {pin.gpio === undefined
-                  ? ''
-                  : pinLabels[pin.gpio]
-                    ? ` · ${pinLabels[pin.gpio]}`
-                    : ''}
-              </title>
+              <title>{[
+                pin.description,
+                pin.gpio !== undefined && !pin.protected ? status.full : '',
+                pin.gpio !== undefined ? pinLabels[pin.gpio] : '',
+              ].filter(Boolean).join(' · ')}</title>
               <rect
                 className="pin-hit"
                 x={right ? padX : edge - rowWidth}
@@ -256,18 +252,18 @@ export function Board({
                 height="24"
                 rx="4"
               />
+              <rect
+                className="pin-outline"
+                x={right ? padX : edge - rowWidth + (narrow ? 0 : 10)}
+                y={y - 12}
+                width={narrow ? rowWidth : rowWidth - 10}
+                height="24"
+                rx="4"
+                aria-hidden="true"
+              />
               <rect className="pin-pad" x={padX} y={y - 7} width="16" height="14" rx="2" />
-              {pin.protected && (
-                <rect
-                  className="pin-protection-hatch"
-                  x={padX + 0.5}
-                  y={y - 6.5}
-                  width="15"
-                  height="13"
-                  rx="1.5"
-                  fill={`url(#${boardId}-${view}-protected)`}
-                  aria-hidden="true"
-                />
+              {glyph && (
+                <PinStateIcon kind={glyph} flipped={['high', 'low', 'input-high'].includes(glyph) && flipped} x={right ? padX + 22 : padX - 24} y={y - 9} />
               )}
               {pin.gpio === 13 && (
                 <g
@@ -275,12 +271,16 @@ export function Board({
                   transform={`translate(${padX}, ${y - 7})`}
                   aria-hidden="true"
                 >
-                  <path d={LED_MARK_PATH} />
+                  <image className="pin-icon-light" href={ledMarkLight} width="16" height="14" />
+                  <image className="pin-icon-dark" href={ledMarkDark} width="16" height="14" />
                 </g>
               )}
-              <text x={right ? padX + 24 : padX - 8} y={y + 5} textAnchor={right ? 'start' : 'end'}>
+              <text
+                x={right ? padX + 46 : padX - 30}
+                y={y + 5}
+                textAnchor={right ? 'start' : 'end'}
+              >
                 {pin.label}
-                {pin.protected ? '*' : ''}
               </text>
             </g>
           )
@@ -300,7 +300,7 @@ export function Board({
         )
       })}
       <span className="board-protection-legend">
-        <i aria-hidden="true" />
+        <PinStateIcon kind="lock" />
         受保护
       </span>
     </div>
@@ -318,8 +318,16 @@ export function Board({
   return (
     <div className={`board-wrap ${embedded ? 'board-embedded' : ''}`}>
       <div className="board-toolbar">
-        <h2>CORE ESP32-C3</h2>
-        <span className="board-orientation">天线上 / USB 下</span>
+        <h2>
+          {selectedStatus ? (
+            <span role="status" aria-label="选中引脚当前状态">
+              {selectedStatus}
+            </span>
+          ) : (
+            'CORE ESP32-C3'
+          )}
+        </h2>
+        {!selectedStatus && <span className="board-orientation">天线上 / USB 下</span>}
         <div className="board-toolbar-space" />
         <div className="board-controls-row">{controls()}</div>
         <button
@@ -339,7 +347,7 @@ export function Board({
           引脚
         </button>
         <button className="text-button" type="button" onClick={() => help.current?.showModal()}>
-          说明
+          图例
         </button>
         {onInternal && (
           <button className="text-button" type="button" onClick={onInternal}>
@@ -350,7 +358,7 @@ export function Board({
       <div className="board-viewport" ref={viewport}>
         {diagram('inline')}
       </div>
-      {legend()}
+      {!embedded && legend()}
       {!embedded && information()}
       <dialog
         ref={dialog}
@@ -369,22 +377,19 @@ export function Board({
         {legend()}
         {information()}
       </dialog>
-      <dialog ref={help} className="board-dialog" aria-labelledby={`${boardId}-help`}>
-        <div className="board-dialog-heading">
-          <h2 id={`${boardId}-help`}>接线图说明</h2>
-          <button type="button" onClick={() => help.current?.close()}>
-            关闭说明
-          </button>
+      <dialog ref={help} className="board-dialog pin-legend-dialog" aria-labelledby={`${boardId}-help`}>
+        <h2 id={`${boardId}-help`}>图形含义 · 空闲时不显示图标</h2>
+        <div className="pin-state-legend">
+          {([
+            ['input-high', '输入 · 高', true], ['low', '输出 · 低', false],
+            ['high', '输出 · 高', false], ['pwm', 'PWM', false],
+            ['adc', '采集', false], ['lock', '保护', false], ['unknown', '未知', false],
+          ] as [PinGlyph, string, boolean][]).map(([kind, label, flip]) => (
+            <span key={kind}><PinStateIcon kind={kind} flipped={flip} />{label}</span>
+          ))}
         </div>
-        <p>{front ? '正面 · 元件朝向你' : '背面 · 左右已翻转'} · 天线上 / USB 下</p>
-        <p>选择引脚查看信息或配置接线。斜纹焊盘与 * 表示受保护，可查看保护原因，不可配置。</p>
-        <p>
-          颜色表示电气类别。蓝色为芯片 ADC 能力，当前固件是否开放以引脚详情为准；PWM 并非 DAC
-          模拟输出。
-        </p>
-        <p>
-          引脚内 LED 符号用于定位 GPIO13 / D5，不代表物理输出。接线图是示意图，不作为尺寸加工图。
-        </p>
+        <p>箭头相对板子指向表示输入／输出；实心与空心表示高／低。类别色块不随状态改变。</p>
+        <button className="text-button" type="button" onClick={() => help.current?.close()}>关闭图例</button>
       </dialog>
       <dialog
         ref={list}

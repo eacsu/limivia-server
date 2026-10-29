@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { BOARD_PINS, displaySide } from './board'
+import { BOARD_PINS, displaySide } from './boardPins'
 describe('实物排针', () => {
   it('完整保留两侧各16个物理位置与重复电源脚', () => {
     expect(BOARD_PINS).toHaveLength(32)

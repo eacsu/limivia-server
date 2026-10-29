@@ -1,5 +1,6 @@
 @import './tokens.css';
 @import './board.css';
+@import './simple-controls.css';
 * {
   box-sizing: border-box;
 }
@@ -7,15 +8,20 @@
   font-family: 'Noto Sans SC Variable', 'Noto Sans SC', system-ui, sans-serif;
   font-size: 13px;
   font-synthesis: none;
+  --input-radius: 2px;
   line-height: 20px;
   color-scheme: light;
 }
 [data-theme='abyssus'] {
   color-scheme: dark;
+  --input-bg: var(--surface-subtle);
+  --input-disabled-bg: var(--bg-secondary);
   --button-primary-bg: var(--accent);
   --button-primary-text: var(--on-accent);
 }
 [data-theme='vallum'] {
+  --input-bg: var(--surface);
+  --input-disabled-bg: var(--bg-secondary);
   --button-primary-bg: var(--text-primary);
   --button-primary-text: var(--bg-primary);
   --surface-raised: var(--surface);
@@ -78,6 +84,18 @@ textarea {
   border-radius: var(--av-radius-sm);
   min-width: 0;
   max-width: 100%;
+}
+input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='file']),
+select,
+textarea {
+  background: var(--input-bg);
+  border-radius: var(--input-radius);
+}
+input:not([type='checkbox']):not([type='radio']):not([type='range']):disabled,
+select:disabled,
+textarea:disabled {
+  background: var(--input-disabled-bg);
+  color: var(--text-secondary);
 }
 input:not([type='checkbox']):not([type='file']),
 select {

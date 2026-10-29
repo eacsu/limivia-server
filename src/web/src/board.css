@@ -124,17 +124,15 @@
   fill: transparent;
   stroke: none;
 }
+.pin .pin-outline {
+  fill: none;
+  stroke: none;
+  pointer-events: none;
+}
 .pin .pin-pad {
   fill: var(--pin-color);
   stroke: var(--text-secondary);
   stroke-width: 1;
-}
-.pin-protection-stripe {
-  stroke: var(--bg-primary);
-  stroke-width: 1;
-}
-.pin-protection-hatch {
-  pointer-events: none;
 }
 .pin-led-mark {
   fill: none;
@@ -143,16 +141,12 @@
   stroke-linecap: round;
   stroke-linejoin: round;
   pointer-events: none;
-  animation: board-led-locate 2.4s ease-in-out 3;
+  animation: board-led-locate 7.2s ease-in-out infinite;
 }
 @keyframes board-led-locate {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.65;
-  }
+  0% { opacity: 1; }
+  16.67% { opacity: 0.65; }
+  33.33%, 100% { opacity: 0.91888; }
 }
 @media (prefers-reduced-motion: reduce) {
   .pin-led-mark {
@@ -164,11 +158,6 @@
   font-family: inherit;
   font-size: 13px;
 }
-.pin.selected-pin .pin-pad {
-  stroke: var(--text-primary);
-  stroke-width: 3;
-  paint-order: stroke;
-}
 .pin.selected-pin text {
   font-weight: 500;
   text-decoration: underline;
@@ -176,8 +165,8 @@
 .pin:focus {
   outline: none;
 }
-.pin:focus .pin-hit,
-.pin.inspected-pin .pin-hit {
+.board .pin:focus .pin-outline,
+.pin.inspected-pin .pin-outline {
   stroke: var(--focus);
   stroke-width: 2;
 }
@@ -200,10 +189,6 @@
 }
 .board-protection-legend {
   color: var(--text-secondary);
-}
-.board-protection-legend i {
-  background: repeating-linear-gradient(135deg, var(--bg-primary) 0 1px, transparent 1px 4px)
-    var(--text-secondary);
 }
 .board-legend {
   display: flex;
@@ -271,11 +256,22 @@
   stroke: var(--focus);
   stroke-width: 1;
 }
-.board-legend .board-protection-legend i {
-  width: 16px;
-  background: repeating-linear-gradient(135deg, var(--bg-primary) 0 1px, transparent 1px 4px)
-    var(--text-secondary);
-}
 .board-dialog .board-legend {
   margin-top: 12px;
 }
+
+.pin-state-icon { display: inline-block; flex-shrink: 0; vertical-align: middle; pointer-events: none; }
+.pin-icon-dark { display: none; }
+[data-theme='abyssus'] .pin-icon-dark { display: initial; }
+[data-theme='abyssus'] .pin-icon-light { display: none; }
+.board-dialog.pin-legend-dialog {
+  width: min(643px, calc(100vw - 32px));
+  border-color: var(--border);
+  border-radius: 4px;
+  padding: 16px;
+}
+.pin-legend-dialog h2 { font-size: 16px; font-weight: 500; line-height: 20px; margin: 0 0 16px; }
+.pin-legend-dialog p { margin: 16px 0; font-size: 13px; line-height: 20px; }
+.pin-legend-dialog > .text-button { display: block; padding: 0; border: 0; min-height: 16px; line-height: 16px; color: var(--accent-strong); }
+.pin-state-legend { display: flex; flex-wrap: wrap; gap: 16px 24px; }
+.pin-state-legend > span { display: inline-flex; align-items: center; gap: 8px; line-height: 20px; }

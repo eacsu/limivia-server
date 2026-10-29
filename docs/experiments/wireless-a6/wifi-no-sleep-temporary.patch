@@ -1,0 +1,22 @@
+--- a/main/network.c
++++ b/main/network.c
+@@ -377,6 +377,9 @@
+         cJSON_AddBoolToObject(*out, "initialized", wifi_initialized);
+         cJSON_AddNumberToObject(*out, "driver_error", wifi_error);
+         cJSON_AddBoolToObject(*out, "connected", atomic_load(&wifi_connected));
++        wifi_ps_type_t current_ps;
++        int ps_error = wifi_initialized ? esp_wifi_get_ps(&current_ps) : ESP_ERR_WIFI_NOT_INIT;
++        cJSON_AddNumberToObject(*out, "wifi_ps", ps_error == ESP_OK ? current_ps : -1);
+         cJSON_AddBoolToObject(*out, "maintenance_ap", atomic_load(&maintenance));
+         cJSON_AddNumberToObject(*out, "events", atomic_load(&wifi_events));
+         cJSON_AddNumberToObject(*out, "ws_calls", atomic_load(&ws_calls));
+@@ -426,6 +429,9 @@
+                 return err;
+         }
+         if ((err = ensure_wifi()))
++            return err;
++        // Temporary benchmark only: compare interactive latency without modem sleep.
++        if ((err = esp_wifi_set_ps(WIFI_PS_NONE)))
+             return err;
+         return esp_wifi_connect();
+     }

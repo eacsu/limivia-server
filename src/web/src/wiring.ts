@@ -1,5 +1,6 @@
 import { type Args, type DeviceState, type Capability } from './device'
-import { BOARD_PINS } from './board'
+import { BOARD_PINS } from './boardPins'
+import { numericBound, parameterOptions } from './parameters'
 export interface WiringGroup {
   id: string
   name: string
@@ -25,7 +26,28 @@ export interface WiringBinding {
   definition: Args
   plan_revision: number
 }
+
+export function mergeSavedPlan(
+  local: WiringPlan,
+  baseline: WiringPlan,
+  saved: WiringPlan,
+): WiringPlan {
+  return {
+    ...local,
+    revision: saved.revision,
+    groups: [
+      ...saved.groups.flatMap((group) => {
+        const previous = baseline.groups.find((g) => g.id === group.id)
+        const current = local.groups.find((g) => g.id === group.id)
+        if (previous && !current) return []
+        return [current && JSON.stringify(current) !== JSON.stringify(previous) ? current : group]
+      }),
+      ...local.groups.filter((group) => !saved.groups.some((g) => g.id === group.id)),
+    ],
+  }
+}
 export type BoardSelection =
+  | { type: 'experiment'; gpio: number }
   | { type: 'pin'; id: string }
   | { type: 'group'; id: string }
   | { type: 'resource'; id: number; instance: number }
@@ -69,6 +91,7 @@ export function newGroup(cap: Capability, gpio?: number, role?: string): WiringG
   const defaults: Args = {
     mode: cap.kind === 'gpio' ? 'input' : 'uart',
     pull: 'none',
+    ...(cap.kind === 'gpio' ? { level: 0 } : {}),
     frequency: 1000,
     resolution: 10,
     duty: 50,
@@ -83,15 +106,18 @@ export function newGroup(cap: Capability, gpio?: number, role?: string): WiringG
     const value = defaults[field.name]
     if (
       value !== undefined &&
-      !(typeof value === 'string' && field.values && !field.values.split(',').includes(value))
+      !(typeof value === 'string' && field.values && !parameterOptions(field).includes(value))
     )
       config[field.name] =
         typeof value === 'number'
-          ? Math.min(field.max ?? Infinity, Math.max(field.min ?? -Infinity, value))
+          ? Math.min(
+              numericBound(field.max) ?? Infinity,
+              Math.max(numericBound(field.min) ?? -Infinity, value),
+            )
           : value
   }
   return {
-    id: crypto.randomUUID(),
+    id: newGroupId(),
     name: '',
     kind: cap.kind,
     pins: gpio === undefined || !role ? {} : { [role]: gpio },
@@ -101,4 +127,14 @@ export function newGroup(cap: Capability, gpio?: number, role?: string): WiringG
     support_pins: [],
     notes: '',
   }
+}
+
+function newGroupId(): string {
+  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+  // 局域网 HTTP 没有 randomUUID，但仍支持安全随机数；方案 ID 保持 UUID v4 格式。
+  const bytes = crypto.getRandomValues(new Uint8Array(16))
+  bytes[6] = (bytes[6] & 0x0f) | 0x40
+  bytes[8] = (bytes[8] & 0x3f) | 0x80
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
 }

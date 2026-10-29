@@ -2,7 +2,7 @@
 
 浏览器通过同源 HTTP 提交业务操作，通过 `/api/device/events` WebSocket 观察快照与增量。后端使用 limivia SDK 公开的 `AsyncLimivia`、`AsyncConnection` 和类型化事件，不转发设备线协议，不复制传输、seq、心跳或设备作业轮询。
 
-## 连接与控制归属
+## 连接与操作代次
 
 服务生命周期管理一个设备连接，单进程、单 worker。Linux 对数据目录持有进程锁，避免同目录多个管理进程竞争。USB/BLE 扫描和连接互斥；WS/MQTT 显式提供 URL，MQTT 必填目标 MAC；证书路径属于服务主机。
 
@@ -10,21 +10,19 @@
 
 `POST /api/pages` 签发页面会话，前端保存在 sessionStorage；HTTP 使用 `X-Page-Session`，WebSocket 首条消息携带 `page_session`。连接管理器与页面生命周期分离，浏览器关闭、刷新和实时通道重连不会断开设备或重放动作。
 
-页面初始为观察者。`control.acquire` 明确申请写权限；其他页面可观察，原控制页离线后通过 `takeover=true` 显式释放旧绑定并重新申请控制。在线控制页不能被其他页面接管。设备 token 不下发；页面会话仅用于本机页面协调，不是远程账户认证。
+连接就绪后，所有页面均可操作本连接创建的资源。页面会话仅用于关联请求及实时订阅，不授予独占写权限。SDK 高层接口及高级批量入口自动获取协议令牌，令牌不下发浏览器；手动 control.acquire/release 不作为页面操作。外部资源仍不自动认领，真实引脚冲突与驱动故障照常反馈。
 
-控制代次隔离停止前的旧完成。`outputs.stop` 有独立入口，绕过普通任务队列满的限制；立即撤销本服务控制归属，只有 SDK 原始停止 job 的清理、持久化与自启抑制确认后才显示完成。
+操作代次 operation_epoch 隔离停止前的旧动作。`outputs.stop` 有独立入口，绕过普通任务队列满的限制；立即推进操作代次，只有 SDK 原始停止 job 的清理、持久化与自启抑制确认后才显示完成。
 
 ## 操作关联与事件消费
 
-每连接唯一 `async for event in connection` 消费者。公开 request ID 与连接代次组合映射至稳定的服务 operation ID；同时记录 device_id、boot_id、已知 job_id。提交前创建记录，快速事件通过最多 256 个请求的有界暂存重放，不丢弃其他请求事件。
+普通 GPIO/PWM/ADC/UART 使用 `board.gpio/pwm/adc/uart` 工厂，其他资源通过 `board.resources.open` 持有高层资源对象；结果通过公开模型及 `OperationResult.data` 归一化到 HTTP。资源对象由设备连接持有，不绑定单个请求或浏览器页面。普通成功结果没有 request/job 编号时字段保持空值，任务为 running→completed/failed/unknown。SDK 错误保留真实编号、驱动错误、过期标记及资源清理诊断。
 
-- submitted：SDK 本地入队；accepted：设备作业已受理。
-- completed/failed/cancelled：按直接 RPC 或原始 job 终态更新。
-- unknown：超时、断线或可能存在外部副作用，不能自动重发。
-- result_expired 单独保留，同时保存 SDK 提供的 job 状态；当前 SDK 以 `command.failed(reason=result_expired)` 交付这一情形。
-- job_expired 表示历史句柄淘汰，与结果内容过期分开。
+显式 `job.submit/get/cancel/wait` 使用 `board.jobs` 和真实 `AsyncJob`。高级 batch、GPIO 组协议操作，以及 SDK 尚无认领接口的外部资源只读 status 诊断使用公开 `board.raw`，不重新创建、认领外部资源。只有这些入口保留原始提交/受理关联；单个订阅溢出后重建订阅并刷新快照，不关闭其他消费者或整个连接。
 
-显式 job.get 是查询，不创建设备作业跟踪器；可核对同设备、同 boot 的历史未知任务。结果已过期仍保留 unknown；停止作业即使报告 completed，也必须满足清理、持久化和自启抑制条件。job.cancel 完成仅说明取消请求处理完成。job.finished/data.available 都不是业务完成或实际样本。
+WebSocket 握手后可发送 `{type:"observe",visible:true/false}`。所有可见订阅共同驱动一个约 1 秒的只读循环；隐藏、卸载及 socket 关闭撤销需求，慢设备自然延长周期，不重叠读取。观察不申请控制、不消费事件队列、不写操作历史。`resource_observations` 包含 generation、device_id、boot_id、instance、observed_at、quality 与 level；未知、故障、断开或实例变化丢弃旧读数。普通 GPIO 写成功后立即读回；快照变化只刷新结构，不让导航反复进入“待识别”。
+
+浏览器离开或刷新不清理资源。显式“结束实验并断开”及服务正常关闭调用 SDK 连接释放，清理本连接拥有的资源；其他来源不受影响。清理失败保留未知结果并提示重新连接核实，不宣称输出已经停止。
 
 普通在途操作最多 64 个；每订阅者缓冲 128 条。慢订阅者溢出时改发完整重同步快照，不阻塞 SDK 消费者。SQLite 保存脱敏任务状态，默认保留 30 天、最多 10,000 条已结束任务，不淘汰未结束记录。进程重启将未确认任务标为 unknown，不自动重连。
 
@@ -34,7 +32,7 @@
 
 资源 definition 是创建配置，不冒充实时状态。resource.call 的确认结果进入独立观测缓存。关闭失败后只读刷新快照，fault 保持占用；recover 重试关闭，不重新打开。
 
-周期 ADC 由显式采样入口启动唯一的后端资源读取任务，每 500ms 最多一次；多个页面共享最多 120 条原始事件。控制失效或一次读取失败即停止消费；不会因通知自动启动读取。连续 ADC/RMT/I²S 保留各自二进制格式，不伪造单位或测量结论。
+周期 ADC 由显式采样入口启动唯一的后端资源读取任务，每 500ms 最多一次；多个页面共享最多 120 条原始事件。连接结束或一次读取失败即停止消费；不会因通知自动启动读取。连续 ADC/RMT/I²S 保留各自二进制格式，不伪造单位或测量结论。
 
 上传使用服务后台任务串行执行 begin→384 字节 chunk→commit。父任务单独显示字节与校验阶段，子操作保持完整关联；失败只清理本任务已知且仍有权限的上传。未知结果不重发。OTA commit 固定默认 reboot=false。下载分块读取，秘密文件由设备拒绝读回。
 
@@ -44,9 +42,9 @@
 |---|---|
 |GET /api/device/discover?kind=ble或usb|扫描服务主机候选|
 |POST /api/device/connect、/disconnect|显式连接或断开|
-|GET /api/device|身份、发现、快照、观测值、采样与控制归属|
+|GET /api/device|身份、发现、快照、观测值、采样、同步健康及资源来源|
 |POST /api/device/refresh|刷新完整能力和一致状态，不申请控制|
-|POST /api/device/operations|`{op,args,takeover?,generation?,boot_id?}`；202 返回服务任务|
+|POST /api/device/operations|`{op,args,generation?,boot_id?,operation_epoch?}`；202 返回服务任务|
 |POST /api/device/batches|操作数组；每项独立任务，不保证事务/顺序|
 |POST /api/device/stop|独立全局停止|
 |GET /api/operations、/{id}|任务分页与详情|
@@ -57,8 +55,24 @@
 |GET /api/device/files/{name}/download|分块读取非秘密文件|
 |POST /api/device/flows/validate|结构化流程本地校验；设备最终裁定|
 
-前端提交携带当前 generation/boot_id；服务拒绝连接切换后的旧草稿。多步动作冻结同一作用域，上传在读取主机文件后再次检查连接与控制归属。直接脚本省略作用域时表示明确针对当前服务连接。
+前端提交携带当前 generation/boot_id/operation_epoch；服务拒绝连接切换后的旧草稿。多步动作冻结同一作用域，上传在读取主机文件后再次检查连接与操作代次。直接脚本省略作用域时表示明确针对当前服务连接。
 
 单项和批量动作参数中的 `data`/`will` 可使用 `{encoding:"text"或"hex"或"base64",value:"..."}`；服务显式转换成 bytes 再交给 SDK。普通 JSON 对象不作为二进制解释。未知字段、长度、范围与完整请求大小最终由 SDK 和设备校验。
 
 日志、实时消息和历史记录过滤 session/control、密码、密钥、证书私钥路径及已知凭据文本。任务不保存原始提交参数。全部模拟设备、测试控制接口和历史能力向量只存在 tests 目录，不进入应用包。
+
+通知为最佳努力提示，state.changed/notifications.gap 只触发共享快照查询，不清空已确认状态。所有快照调用共享一个在途查询，GPIO 状态读取按资源实例合并；等待超时不启动第二个同类在途查询。快速失败进入 recovering 并保留上次确认值，连续失败超过 3 秒才标记不可用；资源读数失败只影响该资源。snapshot_sync 独立记录同步健康与最后成功时间。连接代次、boot 或资源实例变化立即失效旧读数，修改操作使旧读取版本失效，晚到读取不能覆盖新确认值。
+
+3 秒只用于后台观察的保鲜宽限。连接初始化、显式刷新与结构修改后的快照确认等待完整分页结果，受业务等待和 SDK 查询期限限制；不能因蓝牙分页超过保鲜宽限就判定初始化失败，或把已停止操作提前标记为结果未知。初始化成功清除之前的错误；失败提示区分固件能力与状态快照，并保留脱敏后的错误原因。慢速查询测试不代表 Windows BLE 实机验收。
+
+浏览器界面由明确动作按钮直接提交，不使用二次确认弹窗。`storage.format` / `system.nvs_format` 的协议确认参数由操作入口按目录描述自动附加，不要求用户再输入文字；HTTP/设备契约及后端确认参数校验继续保留。网络重配置、停止、断开、级联关闭、自动启动和 OTA 上传同样由对应按钮直接执行，结果与错误仍按真实终态反馈。
+
+创建、关闭及写入操作的服务任务完成状态在后续结构快照或 GPIO 读回发布后才写入，避免客户端已经收到完成结果却仍看不到对应资源/确认值。设备动作已确认、但后续查验失败时记录为结果待核实并保留可能已执行的标记，不自动重放写入。
+
+## a5 快速操作与后台分页
+
+GPIO 创建和已有 GPIO 的读/写/状态、已有 PWM duty/status 由 SDK 等待直接确认结果。GPIO 写结果直接写入资源观察，不再另起 status/read；GPIO open 立即局部合并 info 与初始电平，整板结构随后后台同步。快速请求不等待整份快照，仅由 SDK 调度等待正在发送或执行的普通帧；慢操作仍沿用完整快照协调。
+
+共享查询记录快速操作版本。若 SDK 分页因本连接的快速操作发生 snapshot_expired，重启只读分页，不把主动让路记成设备失败；驱动或连接错误仍走原健康判断。旧连接、实例与旧读数版本仍不得覆盖确认值。
+
+浏览器使用现有 operation WebSocket 终态完成等待，最多缓存 128 条以处理先到事件，核对 generation/boot；每秒只读任务查询作为漏通知回退，不再每 150ms 轮询。

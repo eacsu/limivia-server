@@ -40,6 +40,6 @@ export function useWorkbench() {
     setError,
     attempt,
     ready: state.status === 'ready',
-    enabled: online && state.status === 'ready' && state.control.mine && state.control.held,
+    enabled: online && state.status === 'ready',
   }
 }

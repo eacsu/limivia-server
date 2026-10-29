@@ -3,7 +3,6 @@ import { api, type Args, type DeviceState } from './device'
 import { confirmedLedOutput, ledOutputKey, type ConfirmedLedOutput } from './ledOutput'
 import { useDelayedFlag } from './useDelayedFlag'
 import { Action } from './Forms'
-import { ControlAction } from './ControlAction'
 import { LedIndicator, NumberField } from './WorkbenchUI'
 import boardLight from './assets/figma/led-board-vallum.svg'
 import boardDark from './assets/figma/led-board-abyssus.svg'
@@ -38,7 +37,8 @@ export function LedPanel({
   const pending = useRef(false)
   const boardSupported = state.identity?.board === 'luatos-esp32c3-usb'
   const fresh = online && state.status === 'ready' && !state.stale
-  const occupied = !!r && (!state.resource_owners[r.id] || !['gpio', 'pwm'].includes(r.kind))
+  const occupied =
+    !!r && (state.resource_origin[r.id] !== 'managed' || !['gpio', 'pwm'].includes(r.kind))
   const resourceKey = ledOutputKey(state, r)
   const [invalidatedKey, setInvalidatedKey] = useState<string | null>(null)
   const released = !!r && invalidatedKey === resourceKey
@@ -91,9 +91,7 @@ export function LedPanel({
     const scope = api.deviceScope()
     const run = (op: string, args: Args = {}) => api.run(op, args, scope)
     const kind = mode === 'switch' ? 'gpio' : 'pwm'
-    if (r && r.kind !== kind && !confirm('切换模式需要关闭当前 LED 资源，是否继续？')) return
     await transact(async () => {
-      let id = r?.id
       if (r && r.kind !== kind) {
         await run('resource.close', { resource: r.id })
         setInvalidatedKey(resourceKey)
@@ -107,10 +105,10 @@ export function LedPanel({
               ? { mode: 'output', level: 1 }
               : { frequency: 1000, resolution: 10, duty, breath_ms: 2000 },
         }
-        await run('resource.preflight', draft)
         const result = await run('resource.open', draft)
-        id = Number(result.job?.resource ?? result.result?.resource)
+        const id = Number(result.job?.resource ?? result.result?.resource)
         if (!id) throw new Error('未收到 LED 资源句柄。')
+        if (kind === 'pwm') await run('resource.call', { resource: id, action: 'status', args: {} })
       } else {
         await run('resource.call', {
           resource: r.id,
@@ -118,7 +116,6 @@ export function LedPanel({
           args: kind === 'gpio' ? { level: on ? 0 : 1 } : { duty },
         })
       }
-      await run('resource.call', { resource: id!, action: 'status', args: {} })
       setFeedback('操作已确认，已读取设备输出状态。')
     })
   }
@@ -289,7 +286,7 @@ export function LedPanel({
             <Action
               onError={showError}
               keepLabelWhileBusy
-              disabled={!writable || !r}
+              disabled={!online || state.status !== 'ready' || busy || !r || occupied || released}
               run={() =>
                 transact(async () => {
                   await api.run('resource.close', { resource: r!.id })
@@ -318,11 +315,10 @@ export function LedPanel({
                     ? 'GPIO13 已被占用，请从左侧配置核对来源。'
                     : feedback ||
                       (!enabled
-                        ? '观察模式 · 取得设备控制后可操作 LED。'
+                        ? '连接设备后即可操作 LED。'
                         : '输出以设备确认结果为准；断开页面不会停止输出。')}
           </div>
           <div className="led-links">
-            {!embedded && !enabled && fresh && <ControlAction state={state} />}
             {onDetails && (
               <button className="text-button" aria-label="打开 LED 详情" onClick={onDetails}>
                 详细调试 →

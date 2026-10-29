@@ -55,8 +55,8 @@ def completed(client, task):
     )
 
 
-def acquire(client):
-    return completed(client, command(client, "control.acquire"))
+def ready(client):
+    return completed(client, command(client, "diagnostics"))
 
 
 def test_observer_connection_identity_discovery_and_catalog(api):
@@ -64,13 +64,13 @@ def test_observer_connection_identity_discovery_and_catalog(api):
     assert client.get("/api/device/discover").json()["kind"] == "ble"
     assert client.get("/api/device/discover?kind=ws").status_code == 422
     state = connect(client)
-    assert state["identity"]["contract"] == "limivia-v3-jsonrpc2"
+    assert state["identity"]["contract"] == "limivia-v3-jsonrpc2-r2"
     assert state["snapshot"]["revision"] == 1
-    assert not state["control"]["held"]
+    assert "control" not in state
     assert len(client.get("/api/device/catalog").json()) == len(OPERATIONS) == 76
     assert len(KINDS) == 18
     assert "control.acquire" not in [c["op"] for c in backend.connection.commands]
-    assert client.post("/api/device/operations", json={"op": "resource.open"}).status_code == 403
+    assert client.post("/api/device/operations", json={"op": "control.acquire"}).status_code == 422
 
 
 def test_scanning_and_connections_share_lifespan_sdk_search_cache(tmp_path, monkeypatch):
@@ -106,7 +106,7 @@ def test_scanning_and_connections_share_lifespan_sdk_search_cache(tmp_path, monk
 def test_resource_lifecycle_and_secret_projection(api):
     client, backend, _, _ = api
     connect(client)
-    assert acquire(client)["status"] == "completed"
+    assert ready(client)["status"] == "completed"
     opened = completed(
         client,
         command(
@@ -115,8 +115,8 @@ def test_resource_lifecycle_and_secret_projection(api):
             {"kind": "gpio", "pins": {"pin": 13}, "config": {"mode": "output", "level": 0}},
         ),
     )
-    resource = opened["job"]["resource"]
-    assert resource > 0 and opened["job_id"]
+    resource = opened["result"]["resource"]
+    assert resource > 0 and opened["job_id"] is None and opened["request_id"] is None
     called = completed(
         client,
         command(
@@ -133,42 +133,47 @@ def test_resource_lifecycle_and_secret_projection(api):
     assert "session-test" not in body and "control-test" not in body
 
 
-def test_page_refresh_and_explicit_takeover(api):
+def test_pages_share_connection_and_managed_resources(api):
     client, backend, _, token = api
     connect(client)
-    acquire(client)
+    opened = completed(
+        client,
+        command(
+            client,
+            "resource.open",
+            {"kind": "gpio", "pins": {"pin": 0}, "config": {"mode": "output", "level": 0}},
+        ),
+    )
+    resource = opened["result"]["resource"]
     other = client.post("/api/pages").json()["page_session"]
     with client.websocket_connect("/api/device/events", headers=ORIGIN) as ws:
         ws.send_json({"page_session": token})
         assert ws.receive_json()["type"] == "snapshot"
-        assert (
-            client.post(
-                "/api/device/operations",
-                headers={"x-page-session": other},
-                json={"op": "control.acquire", "takeover": True},
-            ).status_code
-            == 409
+        response = client.post(
+            "/api/device/operations",
+            headers={"x-page-session": other},
+            json={
+                "op": "resource.call",
+                "args": {"resource": resource, "action": "write", "args": {"level": 1}},
+            },
         )
+        assert response.status_code == 202
+        assert completed(client, response.json())["status"] == "completed"
     assert not backend.connection.closed
-    client.headers["x-page-session"] = other
-    assert client.post("/api/device/operations", json={"op": "control.acquire"}).status_code == 409
-    assert (
-        completed(client, command(client, "control.acquire", takeover=True))["status"]
-        == "completed"
-    )
-    assert client.get("/api/device").json()["control"]["mine"]
+    assert backend.connection.levels[resource] == 1
+    assert sum(c["op"] == "control.acquire" for c in backend.connection.commands) == 1
 
 
 def test_stop_is_independent_and_revokes_control(api):
     client, _, _, _ = api
     connect(client)
-    acquire(client)
+    ready(client)
     observer = client.post("/api/pages").json()["page_session"]
     task = client.post("/api/device/stop", headers={"x-page-session": observer}).json()
     stop = completed(client, task)
     assert stop["status"] == "completed"
     assert stop["result"]["autostart_inhibited"]
-    assert not client.get("/api/device").json()["control"]["held"]
+    assert "control" not in client.get("/api/device").json()
 
 
 def test_batch_out_of_order_independent_results(api):
@@ -184,7 +189,7 @@ def test_batch_out_of_order_independent_results(api):
 def test_batch_uses_same_explicit_binary_encoding_as_single_commands(api):
     client, backend, _, _ = api
     connect(client)
-    acquire(client)
+    ready(client)
     created = completed(client, command(client, "buffer.create", {"size": 2}))
     response = client.post(
         "/api/device/batches",
@@ -217,7 +222,7 @@ def test_upload_rechecks_target_after_reading_host_file(api):
 
     client, backend, service, page = api
     connect(client)
-    acquire(client)
+    ready(client)
     original = backend.connection
 
     class SwitchFile:
@@ -238,11 +243,12 @@ def test_upload_rechecks_target_after_reading_host_file(api):
 def test_local_validation_and_unknown_disconnect(api):
     client, backend, _, _ = api
     connect(client)
-    acquire(client)
+    ready(client)
     response = client.post(
         "/api/device/operations", json={"op": "resource.open", "args": {"unknown": 1}}
     )
-    assert response.status_code == 422
+    assert response.status_code == 202
+    assert completed(client, response.json())["status"] == "failed"
     backend.connection.disconnect_op = "resource.open"
     task = command(client, "resource.open", {"kind": "gpio", "pins": {"pin": 0}, "config": {}})
     result = completed(client, task)
@@ -250,20 +256,32 @@ def test_local_validation_and_unknown_disconnect(api):
     assert result["error"]["may_have_executed"]
 
 
-def test_cancel_request_does_not_complete_original_job(api):
+def test_explicit_job_cancel_uses_real_job_identity(api):
     client, backend, _, _ = api
     connect(client)
-    acquire(client)
+    ready(client)
     backend.connection.hold_jobs = True
-    original = command(client, "resource.open", {"kind": "gpio", "pins": {"pin": 0}, "config": {}})
-    accepted = until(
-        client, "/api/operations/" + original["id"], lambda t: t["status"] == "accepted"
+    submitted = completed(
+        client,
+        command(
+            client,
+            "job.submit",
+            {
+                "command": {
+                    "type": "system.time",
+                    "params": {},
+                }
+            },
+        ),
     )
-    cancel = completed(client, command(client, "job.cancel", {"job_id": accepted["job_id"]}))
+    assert submitted["status"] == "completed"
+    job_id = submitted["job_id"]
+    assert job_id and submitted["result"]["state"] == "accepted"
+    cancel = completed(client, command(client, "job.cancel", {"job_id": job_id}))
     assert cancel["status"] == "completed"
-    assert client.get("/api/operations/" + original["id"]).json()["status"] == "accepted"
     backend.connection.hold_jobs = False
-    assert completed(client, original)["status"] == "cancelled"
+    queried = completed(client, command(client, "job.get", {"job_id": job_id}))
+    assert queried["result"]["state"] == "cancelled"
 
 
 @pytest.mark.parametrize(
@@ -339,7 +357,7 @@ def test_flow_validation():
 def test_upload_commit_download_and_owned_abort(api):
     client, backend, _, _ = api
     connect(client)
-    acquire(client)
+    ready(client)
     data = b"v3-file-" * 100
     task = client.post(
         "/api/device/files/upload?name=experiment.json", files={"file": ("experiment.json", data)}
@@ -363,7 +381,7 @@ def test_upload_commit_download_and_owned_abort(api):
 def test_secret_file_never_read_back_or_listed(api):
     client, _, _, _ = api
     connect(client)
-    acquire(client)
+    ready(client)
     task = client.post(
         "/api/device/files/upload?name=secret.json&secret=true",
         files={"file": ("secret.json", b'{"password":"never-display"}')},
@@ -378,7 +396,7 @@ def test_secret_file_never_read_back_or_listed(api):
 def test_ota_commit_defaults_no_reboot(api):
     client, backend, _, _ = api
     connect(client)
-    acquire(client)
+    ready(client)
     task = client.post(
         "/api/device/ota/upload?profile=bus", files={"file": ("firmware.bin", b"image" * 100)}
     ).json()
@@ -394,7 +412,7 @@ def test_ota_commit_defaults_no_reboot(api):
 def test_flow_upload_load_run_stop_remove_are_distinct(api):
     client, backend, _, _ = api
     connect(client)
-    acquire(client)
+    ready(client)
     definition = {
         "version": 1,
         "profile": "bus",
@@ -431,12 +449,12 @@ def test_flow_upload_load_run_stop_remove_are_distinct(api):
 def test_fault_resource_stays_occupied_until_recover(api):
     client, backend, _, _ = api
     connect(client)
-    acquire(client)
+    ready(client)
     opened = completed(
         client,
         command(client, "resource.open", {"kind": "gpio", "pins": {"pin": 13}, "config": {}}),
     )
-    resource = opened["job"]["resource"]
+    resource = opened["result"]["resource"]
     backend.connection.cleanup_fault = True
     closed = completed(client, command(client, "resource.close", {"resource": resource}))
     assert closed["status"] == "failed"
@@ -453,7 +471,7 @@ def test_fault_resource_stays_occupied_until_recover(api):
 def test_parent_child_resources_require_explicit_cascade(api):
     client, backend, _, _ = api
     connect(client)
-    acquire(client)
+    ready(client)
     parent = completed(
         client,
         command(
@@ -465,7 +483,7 @@ def test_parent_child_resources_require_explicit_cascade(api):
                 "config": {},
             },
         ),
-    )["job"]["resource"]
+    )["result"]["resource"]
     child = completed(
         client,
         command(
@@ -478,7 +496,7 @@ def test_parent_child_resources_require_explicit_cascade(api):
                 "config": {"address": 83},
             },
         ),
-    )["job"]["resource"]
+    )["result"]["resource"]
     client.post("/api/device/refresh")
     state = until(client, "/api/device", lambda state: len(state["snapshot"]["resources"]) == 2)
     assert next(r for r in state["snapshot"]["resources"] if r["id"] == child)["parent"] == parent
@@ -489,7 +507,7 @@ def test_parent_child_resources_require_explicit_cascade(api):
         client,
         command(
             client,
-            "resource.close",
+            "resource.recover",
             {
                 "resource": parent,
                 "cascade": True,
@@ -512,13 +530,21 @@ def test_expired_job_handle_is_distinct_from_expired_result(api):
 def test_result_expired_and_response_capacity(api):
     client, backend, _, _ = api
     connect(client)
-    acquire(client)
+    ready(client)
     backend.connection.result_expired = True
     opened = completed(
-        client, command(client, "resource.open", {"kind": "gpio", "pins": {"pin": 0}, "config": {}})
+        client,
+        command(
+            client,
+            "resource.open",
+            {"kind": "pwm", "pins": {"pin": 0}, "config": {"frequency": 1000}},
+        ),
     )
     assert opened["status"] == "unknown" and opened["result_expired"]
     backend.connection.result_expired = False
+    confirmed_open = completed(
+        client, command(client, "resource.open", {"kind": "gpio", "pins": {"pin": 1}, "config": {}})
+    )
     backend.connection.bad_response = lambda response: {
         "id": response["id"],
         "ok": False,
@@ -529,11 +555,22 @@ def test_result_expired_and_response_capacity(api):
         command(
             client,
             "resource.call",
-            {"resource": opened["job"]["resource"], "action": "write", "args": {"level": 1}},
+            {
+                "resource": confirmed_open["result"]["resource"],
+                "action": "write",
+                "args": {"level": 1},
+            },
         ),
     )
     assert failed["status"] == "unknown" and failed["external_effect_possible"]
-    assert len([c for c in backend.connection.commands if c["op"] == "resource.call"]) == 1
+    assert len([c for c in backend.connection.commands if c["op"] == "resource.call"]) <= 1
+    assert (
+        sum(
+            c["op"] == "resource.call" and c["params"].get("action") == "write"
+            for c in backend.connection.commands
+        )
+        == 1
+    )  # Unknown direct result never causes a write replay.
 
 
 def test_revision_zero_is_not_ignored(api, monkeypatch):
@@ -545,35 +582,36 @@ def test_revision_zero_is_not_ignored(api, monkeypatch):
     assert all(page["revision"] == 0 for page in state["snapshot"]["pages"])
 
 
-def test_fast_event_before_registration_is_replayed(api, monkeypatch):
+def test_fast_batch_event_before_registration_is_replayed(api, monkeypatch):
     from limivia.types import CommandCompletedEvent
 
     client, _, service, _ = api
     connect(client)
 
-    async def immediate(command):
+    async def immediate(commands):
         await service.reduce(
-            CommandCompletedEvent(request_id=4242, op=command["type"], result={"fast": True}),
+            CommandCompletedEvent(request_id=4242, op="diagnostics", result={"fast": True}),
             service.generation,
         )
-        return 4242
+        return [4242]
 
-    monkeypatch.setattr(service.connection, "send", immediate)
-    task = command(client, "diagnostics")
+    monkeypatch.setattr(service.connection.raw, "batch", immediate)
+    response = client.post("/api/device/batches", json=[{"op": "diagnostics"}])
+    task = completed(client, response.json()[0])
     assert task["status"] == "completed" and task["result"]["fast"]
 
 
 def test_binary_text_hex_encoding_and_canonical_base64(api):
     client, backend, _, _ = api
     connect(client)
-    acquire(client)
+    ready(client)
     opened = completed(
         client,
         command(
             client, "resource.open", {"kind": "uart", "pins": {"tx": 20, "rx": 21}, "config": {}}
         ),
     )
-    resource = opened["job"]["resource"]
+    resource = opened["result"]["resource"]
     for encoding, value in [("text", "你好"), ("hex", "01 02")]:
         task = completed(
             client,
@@ -610,7 +648,7 @@ def test_binary_text_hex_encoding_and_canonical_base64(api):
 def test_adc_consumer_is_shared_and_bounded(api):
     client, backend, _, _ = api
     connect(client)
-    acquire(client)
+    ready(client)
     opened = completed(
         client,
         command(
@@ -619,7 +657,7 @@ def test_adc_consumer_is_shared_and_bounded(api):
             {"kind": "adc", "pins": {"pin": 0}, "config": {"interval_ms": 100}},
         ),
     )
-    resource = opened["job"]["resource"]
+    resource = opened["result"]["resource"]
     until(client, "/api/device", lambda s: bool(s["snapshot"]["resources"]))
     assert client.post(f"/api/device/resources/{resource}/sampling?enabled=true").status_code == 200
     state = until(client, "/api/device", lambda s: bool(s["samples"].get(str(resource))))
@@ -651,40 +689,35 @@ def test_adc_consumer_is_shared_and_bounded(api):
 )
 def test_all_public_operations_reach_sdk_with_stable_task_id(api, monkeypatch, op):
     """网关分派覆盖；参数/驱动语义另由集成测试和 SDK 负责，不冒充硬件验收。"""
-    from limivia.types import CommandCompletedEvent
-
     client, _, service, _ = api
     connect(client)
-    acquire(client)
+    ready(client)
     captured = []
 
-    async def send(event):
-        captured.append(event)
-        await service.reduce(
-            CommandCompletedEvent(
-                request_id=50000, op=event["type"], result={"gateway_operation": event["type"]}
-            ),
-            service.generation,
-        )
-        return 50000
+    async def execute(operation, args):
+        captured.append(operation)
+        if operation == "state.snapshot":
+            return service.state["snapshot"]
+        return {"gateway_operation": operation, "resource": 987, "instance": 987}
 
-    monkeypatch.setattr(service.connection, "send", send)
+    monkeypatch.setattr(service.business, "execute", execute)
     args = {"resource": 987, "buffer_id": 987, "flow_id": 987, "upload_id": 987}
     if op == "storage.format":
         args["confirm"] = "erase_littlefs"
     if op == "system.nvs_format":
         args["confirm"] = "erase_nvs"
-    task = command(client, op, args)
+    task = completed(client, command(client, op, args))
     assert task["status"] == "completed"
     assert task["result"]["gateway_operation"] == op
-    assert captured[0]["type"] == op
-    assert task["id"] and task["generation"] == 1 and task["request_id"] == 50000
+    assert captured[0] == op
+    assert task["id"] and task["generation"] == 1
+    assert task["request_id"] is None and task["job_id"] is None
 
 
 def test_stale_explicit_connection_scope_never_submits(api):
     client, backend, _, _ = api
     connect(client)
-    acquire(client)
+    ready(client)
     before = len(backend.connection.commands)
     response = client.post(
         "/api/device/operations",
@@ -761,10 +794,15 @@ def test_finite_loop_without_wait_is_bounded_not_a_busy_cycle():
 def test_expired_result_query_never_fabricates_original_completion(api):
     client, backend, _, _ = api
     connect(client)
-    acquire(client)
+    ready(client)
     backend.connection.result_expired = True
     task = completed(
-        client, command(client, "resource.open", {"kind": "gpio", "pins": {"pin": 0}, "config": {}})
+        client,
+        command(
+            client,
+            "resource.open",
+            {"kind": "pwm", "pins": {"pin": 0}, "config": {"frequency": 1000}},
+        ),
     )
     assert task["status"] == "unknown" and task["result_expired"]
     completed(client, command(client, "job.get", {"job_id": task["job_id"]}))
@@ -775,13 +813,13 @@ def test_expired_result_query_never_fabricates_original_completion(api):
 def test_stop_query_still_requires_cleanup_and_persistence_confirmation(api):
     client, backend, _, _ = api
     connect(client)
-    acquire(client)
+    ready(client)
     backend.connection.stop_persist_error = 9
     task = completed(client, client.post("/api/device/stop").json())
     assert task["status"] == "unknown"
     completed(client, command(client, "job.get", {"job_id": task["job_id"]}))
     assert client.get("/api/operations/" + task["id"]).json()["status"] == "unknown"
-    assert not client.get("/api/device").json()["control"]["held"]
+    assert "control" not in client.get("/api/device").json()
 
 
 def test_notifications_gap_recovers_read_only_and_retains_single_consumer(api):
@@ -798,7 +836,14 @@ def test_notifications_gap_recovers_read_only_and_retains_single_consumer(api):
         dropped=3,
     )
     client.portal.call(service.reduce, event, service.generation)
-    until(client, "/api/device", lambda state: not state["stale"])
+    until(
+        client,
+        "/api/device",
+        lambda state: (
+            not state["stale"]
+            and any(c["op"] == "state" for c in backend.connection.commands[before:])
+        ),
+    )
     after = backend.connection.commands[before:]
     assert any(c["op"] == "state" for c in after)
     assert not any(c["op"] in {"resource.call", "control.acquire", "outputs.stop"} for c in after)
@@ -843,20 +888,21 @@ def test_completed_history_is_bounded_without_evicting_unfinished(tmp_path):
     store.close()
 
 
-def test_pending_control_claim_cannot_be_overtaken(api):
+def test_concurrent_pages_share_one_automatic_sdk_acquisition(api):
     client, backend, _, _ = api
     connect(client)
-    backend.connection.write_delay = 0.1
-    original = command(client, "control.acquire")
+    backend.connection.write_delay = 0.01
+    original = command(client, "resource.open", {"kind": "gpio", "pins": {"pin": 0}, "config": {}})
     other = client.post("/api/pages").json()["page_session"]
     response = client.post(
         "/api/device/operations",
         headers={"x-page-session": other},
-        json={"op": "control.acquire", "takeover": True},
+        json={"op": "resource.open", "args": {"kind": "gpio", "pins": {"pin": 1}, "config": {}}},
     )
-    assert response.status_code == 409
+    assert response.status_code == 202
     assert completed(client, original)["status"] == "completed"
-    assert len([c for c in backend.connection.commands if c["op"] == "control.acquire"]) == 1
+    assert completed(client, response.json())["status"] == "completed"
+    assert sum(c["op"] == "control.acquire" for c in backend.connection.commands) == 1
 
 
 def test_reconnect_cancels_previous_capability_initializer(api, monkeypatch):
@@ -917,7 +963,7 @@ def test_expected_identity_mismatch_never_enters_ready(api):
     assert not state["identity"] and state["error"]
 
 
-def test_sdk_event_overflow_is_a_connection_fault(api, monkeypatch):
+def test_sdk_subscriber_overflow_recovers_without_losing_connection(api, monkeypatch):
     client, backend, service, _ = api
     connect(client)
 
@@ -930,39 +976,33 @@ def test_sdk_event_overflow_is_a_connection_fault(api, monkeypatch):
                 await resume.wait()
             await reduce(event, generation)
 
-        # 模拟服务消费者暂时滞后，让真实 SDK 的有界队列积压。
         monkeypatch.setattr(service, "reduce", delayed_reduce)
-        try:
-            for sequence in range(1, 400):
-                await backend.connection.emit(
-                    {
-                        "event": "data.available",
-                        "event_sequence": sequence,
-                        "revision": 1,
-                        "resource": 1,
-                        "instance": 1,
-                        "job_id": 0,
-                        "sequence": sequence,
-                        "dropped": 0,
-                    }
-                )
-            async with asyncio.timeout(3):
-                while not backend.connection.closed:
-                    await asyncio.sleep(0)
-        finally:
-            resume.set()
+        for sequence in range(1, 400):
+            await backend.connection.emit(
+                {
+                    "event": "data.available",
+                    "event_sequence": sequence,
+                    "revision": 1,
+                    "resource": 1,
+                    "instance": 1,
+                    "job_id": 0,
+                    "sequence": sequence,
+                    "dropped": 0,
+                }
+            )
+        await asyncio.sleep(0.05)
+        resume.set()
 
     client.portal.call(burst)
-    state = until(client, "/api/device", lambda state: state["status"] == "disconnected")
-    assert state["error"]["reason"] == "event_buffer_overflow"
-    assert service.connection is None
+    assert not backend.connection.closed
+    assert completed(client, command(client, "diagnostics"))["status"] == "completed"
 
 
 @pytest.mark.parametrize("kind", ["gpio", "pwm"])
 def test_observer_reads_output_status_without_control_or_output_changes(api, kind):
     client, backend, _, _ = api
     connect(client)
-    acquire(client)
+    ready(client)
     opened = completed(
         client,
         command(
@@ -982,13 +1022,12 @@ def test_observer_reads_output_status_without_control_or_output_changes(api, kin
             },
         ),
     )
-    resource = opened["job"]["resource"]
+    resource = opened["result"]["resource"]
     until(
         client,
         "/api/device",
         lambda state: any(r["id"] == resource for r in state["snapshot"]["resources"]),
     )
-    completed(client, command(client, "control.release"))
     before = len(backend.connection.commands)
     result = completed(
         client,
@@ -1006,39 +1045,56 @@ def test_observer_reads_output_status_without_control_or_output_changes(api, kin
     assert result["result"]["enabled"] is True
     if kind == "gpio":
         assert result["result"]["level"] == 1
-    assert not client.get("/api/device").json()["control"]["held"]
+    assert "control" not in client.get("/api/device").json()
     assert not any(
         c["op"] in {"control.acquire", "resource.open", "resource.close"}
         for c in backend.connection.commands[before:]
     )
-    for action, args in [
-        ("write", {"level": 0}),
-        ("duty", {"duty": 0}),
-        ("status", {"unexpected": 1}),
-    ]:
-        response = client.post(
-            "/api/device/operations",
-            json={
-                "op": "resource.call",
-                "args": {
-                    "resource": resource,
-                    "action": action,
-                    "args": args,
-                },
-            },
-        )
-        assert response.status_code == 403
-    assert (
-        client.post(
-            "/api/device/operations",
-            json={
-                "op": "resource.call",
-                "args": {
-                    "resource": 9999,
-                    "action": "status",
-                    "args": {},
-                },
-            },
-        ).status_code
-        == 403
+
+
+def test_batch_gpio_write_fills_instance_and_applies_confirmed_state(api):
+    client, backend, _, _ = api
+    connect(client)
+    ready(client)
+    opened = completed(
+        client,
+        command(
+            client,
+            "resource.open",
+            {"kind": "gpio", "pins": {"pin": 13}, "config": {"mode": "output", "level": 1}},
+        ),
     )
+    resource = opened["result"]["resource"]
+    before = len(backend.connection.commands)
+    response = client.post(
+        "/api/device/batches",
+        json=[
+            {
+                "op": "resource.call",
+                "args": {"resource": resource, "action": "write", "args": {"level": 0}},
+            }
+        ],
+    )
+    assert response.status_code == 202, response.text
+    task = completed(client, response.json()[0])
+    assert task["status"] == "completed"
+    sent = [c for c in backend.connection.commands[before:] if c["op"] == "resource.call"]
+    assert len(sent) == 1 and sent[0]["params"]["instance"] == resource
+    assert client.get("/api/device").json()["resource_observations"][str(resource)]["level"] == 0
+
+
+def test_sdk_connection_error_is_not_replaced_by_generic_prompt(api, monkeypatch):
+    from limivia import DeviceConnectionError
+
+    client, backend, _, _ = api
+
+    async def unavailable():
+        raise DeviceConnectionError("BLE GATT 建连失败：controller link failed")
+
+    monkeypatch.setattr(backend.connection, "open", unavailable)
+    assert (
+        client.post("/api/device/connect", json={"kind": "usb", "target": "test"}).status_code
+        == 202
+    )
+    state = until(client, "/api/device", lambda s: s["status"] == "disconnected")
+    assert "controller link failed" in state["error"]

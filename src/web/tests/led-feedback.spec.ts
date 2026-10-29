@@ -1,11 +1,11 @@
 import { test, expect } from '@playwright/test'
-import { reset, connect, acquire, selectLed } from './helpers'
+import { reset, connect, ready, selectLed } from './helpers'
 
 test.beforeEach(async ({ page }) => {
   await reset(page)
   await connect(page)
   await selectLed(page)
-  await acquire(page)
+  await ready(page)
 })
 
 for (const theme of ['vallum', 'abyssus'])
@@ -68,6 +68,10 @@ for (const theme of ['vallum', 'abyssus'])
         await expect(led.getByRole('heading', { name: '已熄灭', exact: true })).toBeVisible()
         await expect(led.getByRole('button', { name: '点亮 LED', exact: true })).toBeEnabled()
       }
+      // Let the final confirmed render reach the geometry sampler before stopping RAF.
+      await page.evaluate(
+        () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+      )
       const samples = await page.evaluate(() =>
         (
           window as unknown as {
@@ -152,10 +156,9 @@ test('LED 错误在固定反馈区持续显示，修正后可重试', async ({ p
 
 test('连接关闭仍然明确显示断开提示', async ({ page }) => {
   await page.getByRole('navigation').getByRole('button', { name: '连接详情', exact: true }).click()
-  page.once('dialog', (dialog) => dialog.accept())
   await page
     .getByRole('dialog', { name: '连接设备', exact: true })
-    .getByRole('button', { name: '断开设备连接', exact: true })
+    .getByRole('button', { name: '结束实验并断开', exact: true })
     .click()
   await expect(page.locator('.connection-status')).toHaveText('未连接')
   await expect(page.locator('main > .notice')).toContainText('设备状态待同步')

@@ -38,7 +38,7 @@ export function ResourceActions({
     }
   }, [state.samples, resource.id, resource.instance, resource.kind, pin])
   const collect = state.sampling?.includes(String(resource.id))
-  return (
+  const content = (
     <>
       <div className="toolbar">
         <h2>
@@ -64,7 +64,9 @@ export function ResourceActions({
           >
             <option value="status">status · 读取状态</option>
             {actions
-              .filter((a) => a.action !== 'status')
+              .filter(
+                (a) => a.action !== 'status' && !(resource.kind === 'gpio' && a.action === 'write'),
+              )
               .map((a) => (
                 <option key={a.action} value={a.action}>
                   {actionNames[a.action] ?? a.action} · {a.action}
@@ -108,7 +110,6 @@ export function ResourceActions({
         <Action
           disabled={!enabled}
           run={async () => {
-            if (!confirm('关闭该资源？存在子资源时将单独提示，未确认清理前仍视为占用。')) return
             setResult(
               (
                 await api.run(resource.state === 'fault' ? 'resource.recover' : 'resource.close', {
@@ -123,8 +124,7 @@ export function ResourceActions({
         <Action
           disabled={!enabled}
           run={async () => {
-            if (confirm('级联关闭该父资源和全部子资源？此操作会影响整个资源树。'))
-              setResult(
+            setResult(
                 (await api.run('resource.close', { resource: resource.id, cascade: true })).result,
               )
           }}
@@ -156,5 +156,13 @@ export function ResourceActions({
         周期 ADC 的 raw/mV 与连续 ADC type2 格式不同；I²S PDM 不自动解释为 PCM，TWAI 为经典 CAN。
       </p>
     </>
+  )
+  return resource.kind === 'gpio' ? (
+    <details className="resource-advanced">
+      <summary>资源详情与高级操作</summary>
+      {content}
+    </details>
+  ) : (
+    content
   )
 }

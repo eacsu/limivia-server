@@ -8,6 +8,7 @@ import {
   saveBlob,
 } from './device'
 import { label, enumLabels } from './fieldLabels'
+import { numericBound, parameterOptions, parameterRange } from './parameters'
 export function Action({
   children,
   run,
@@ -29,7 +30,8 @@ export function Action({
     <span className="action-wrap">
       <button
         type="button"
-        className={primary ? 'primary' : ''}
+        className={`${primary ? 'primary' : ''}${busy && keepLabelWhileBusy ? ' busy-stable' : ''}`}
+        aria-busy={busy}
         disabled={disabled || busy}
         onClick={async (event) => {
           const form = event.currentTarget.closest('form')
@@ -215,11 +217,8 @@ export function Fields({
         const name = field.name
         const v = value[name]
         const update = (item: Value) => onChange({ ...value, [name]: item })
-        const options =
-          field.values
-            ?.split(/[|,\s]+/)
-            .map((x) => x.trim())
-            .filter(Boolean) ?? []
+        const options = parameterOptions(field)
+        const range = parameterRange(field)
         const numeric = /int|float|number|u\d|i\d/.test(field.type)
         const bool = /bool/.test(field.type)
         return (
@@ -272,8 +271,8 @@ export function Fields({
                 aria-label={label(name) + (field.required ? ' *' : '')}
                 type={/password|key|pmk/.test(name) ? 'password' : numeric ? 'number' : 'text'}
                 step={/float|number/.test(field.type) ? 'any' : 1}
-                min={field.min}
-                max={field.max}
+                min={numericBound(field.min)}
+                max={numericBound(field.max)}
                 required={field.required}
                 autoComplete={/password|key/.test(name) ? 'new-password' : 'off'}
                 value={String(v ?? '')}
@@ -286,11 +285,7 @@ export function Fields({
                 }}
               />
             )}
-            {(field.min !== undefined || field.max !== undefined) && (
-              <small>
-                {field.min ?? '不限'}–{field.max ?? '不限'}
-              </small>
-            )}
+            {range && <small>{range}</small>}
           </div>
         )
       })}

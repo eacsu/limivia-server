@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { reset, connect, acquire, openResource, saveAndCheck } from './helpers'
+import { reset, connect, ready, openResource, saveAndCheck } from './helpers'
 test('导航与设备上下文按固件能力展示', async ({ page }) => {
   await reset(page)
   const nav = page.getByRole('navigation', { name: '工作台导航' })
@@ -16,14 +16,14 @@ test('导航与设备上下文按固件能力展示', async ({ page }) => {
 test('接线组草稿跨导航保留，导航不重复应用', async ({ page }) => {
   await reset(page)
   await connect(page)
-  await acquire(page)
+  await ready(page)
   await openResource(page, 'PWM')
-  await expect(page.getByLabel('引脚 *', { exact: true })).toHaveValue('4')
+  await expect(page.getByLabel('当前引脚', { exact: true })).toHaveText('GPIO4')
   await page
     .getByRole('navigation')
     .getByRole('button', { name: '设备工作台', exact: true })
     .click()
-  await expect(page.getByLabel('引脚 *', { exact: true })).toHaveValue('4')
+  await expect(page.getByLabel('当前引脚', { exact: true })).toHaveText('GPIO4')
   await saveAndCheck(page)
   await page.getByRole('button', { name: '应用本组', exact: true }).click()
   await expect(page.getByRole('heading', { name: /#\d+ · PWM/ })).toBeVisible()

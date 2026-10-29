@@ -1,0 +1,69 @@
+diff --git a/main/network.c b/main/network.c
+index 48682d9..cf1491f 100644
+--- a/main/network.c
++++ b/main/network.c
+@@ -54,6 +54,7 @@ static esp_netif_t *sta, *ap;
+ uint32_t network_generation(lv_source source) {
+     return source >= LV_WS0 && source <= LV_MQTT3 ? atomic_load(&routes[source - LV_WS0]) : 0;
+ }
++static atomic_uint ws_calls, ws_upgrades, ws_first_error, ws_second_error, ws_type, ws_length, ws_slot, ws_final;
+ static void ws_closed(void *ctx) {
+     int slot = (intptr_t)ctx - 1;
+     if (slot < 0 || slot >= 2)
+@@ -65,7 +66,9 @@ static void ws_closed(void *ctx) {
+     control_wake();
+ }
+ static esp_err_t ws_handler(httpd_req_t *req) {
+-    if (req->method == HTTP_GET) {
++    atomic_fetch_add(&ws_calls, 1);
++    if (req->method == HTTP_GET || req->sess_ctx == NULL) {
++        atomic_fetch_add(&ws_upgrades, 1);
+         xSemaphoreTake(route_lock, portMAX_DELAY);
+         int slot = -1;
+         for (int i = 0; i < 2; ++i)
+@@ -80,13 +83,21 @@ static esp_err_t ws_handler(httpd_req_t *req) {
+             req->free_ctx = ws_closed;
+         }
+         xSemaphoreGive(route_lock);
+-        return slot < 0 ? ESP_ERR_NO_MEM : ESP_OK;
++        if (slot < 0)
++            return ESP_ERR_NO_MEM;
++        if (req->method == HTTP_GET)
++            return ESP_OK;
+     }
+     int slot = (intptr_t)req->sess_ctx - 1;
++    atomic_store(&ws_slot, slot + 1);
+     if (slot < 0 || slot >= 2)
+         return ESP_FAIL;
+     httpd_ws_frame_t frame = {0};
+     int err = httpd_ws_recv_frame(req, &frame, 0);
++    atomic_store(&ws_first_error, err);
++    atomic_store(&ws_type, frame.type);
++    atomic_store(&ws_length, frame.len);
++    atomic_store(&ws_final, frame.final);
+     if (err)
+         return err;
+     if (frame.type != HTTPD_WS_TYPE_TEXT || frame.len > LV_REQUEST_MAX + 1 || frame.fragmented)
+@@ -96,6 +107,7 @@ static esp_err_t ws_handler(httpd_req_t *req) {
+         return ESP_ERR_NO_MEM;
+     frame.payload = (uint8_t *)text;
+     err = httpd_ws_recv_frame(req, &frame, frame.len);
++    atomic_store(&ws_second_error, err);
+     if (!err) {
+         size_t n = frame.len;
+         if (n && text[n - 1] == '\n')
+@@ -367,6 +379,14 @@ static int wifi_work(const char *op, const cJSON *p, cJSON **out) {
+         cJSON_AddBoolToObject(*out, "connected", atomic_load(&wifi_connected));
+         cJSON_AddBoolToObject(*out, "maintenance_ap", atomic_load(&maintenance));
+         cJSON_AddNumberToObject(*out, "events", atomic_load(&wifi_events));
++        cJSON_AddNumberToObject(*out, "ws_calls", atomic_load(&ws_calls));
++        cJSON_AddNumberToObject(*out, "ws_upgrades", atomic_load(&ws_upgrades));
++        cJSON_AddNumberToObject(*out, "ws_first_error", atomic_load(&ws_first_error));
++        cJSON_AddNumberToObject(*out, "ws_second_error", atomic_load(&ws_second_error));
++        cJSON_AddNumberToObject(*out, "ws_type", atomic_load(&ws_type));
++        cJSON_AddNumberToObject(*out, "ws_length", atomic_load(&ws_length));
++        cJSON_AddNumberToObject(*out, "ws_slot", atomic_load(&ws_slot));
++        cJSON_AddNumberToObject(*out, "ws_final", atomic_load(&ws_final));
+         esp_netif_ip_info_t ip;
+         if (sta && esp_netif_get_ip_info(sta, &ip) == ESP_OK) {
+             char addr[16];

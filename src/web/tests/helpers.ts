@@ -16,11 +16,12 @@ export async function connect(page: Page, profile = 'signal') {
   await expect(page.locator('.identity-tag')).toContainText(profile)
   await expect(page.locator('.connection-status')).toHaveText('已连接')
 }
-export async function acquire(page: Page) {
-  await page.getByRole('button', { name: '取得设备控制', exact: true }).first().click()
-  await expect(page.locator('.control-status')).toHaveText('已取得控制')
+export async function ready(page: Page) {
+  await expect(page.locator('.connection-status')).toHaveText('已连接')
+  await expect(page.getByRole('button', { name: /^(取得|释放|接管)设备控制$/ })).toHaveCount(0)
 }
 export async function selectPin(page: Page, id: string) {
+  await expect(page.locator('.connection-status')).toHaveText('已连接')
   const back = page.getByRole('button', { name: '← 返回板卡', exact: true })
   if (await back.isVisible()) await back.click()
   await page.locator(`.board-stage [data-pin-id="${id}"]:visible`).click()
@@ -46,6 +47,8 @@ export async function openResource(page: Page, name: string) {
     return
   }
   await selectPin(page, 'R12')
+  const functions = page.getByRole('button', { name: '选择其他功能', exact: true })
+  if (await functions.isVisible()) await functions.click()
   const family = name.startsWith('I²C')
     ? 'I²C'
     : name.startsWith('SPI')
@@ -77,4 +80,16 @@ export async function saveAndCheck(page: Page) {
   await expect(page.getByRole('button', { name: '检查本组', exact: true })).toBeEnabled()
   await page.getByRole('button', { name: '检查本组', exact: true }).click()
   await expect(page.getByRole('button', { name: '应用本组', exact: true })).toBeEnabled()
+}
+
+export async function saveGpio(page: Page) {
+  const details = page.locator('.direct-gpio > .wiring-notes')
+  if ((await details.getAttribute('open')) === null) await details.locator('summary').click()
+  await page.getByRole('button', { name: '保存到接线方案', exact: true }).click()
+  await expect(page.getByRole('button', { name: '保存方案', exact: true })).toBeDisabled()
+}
+
+export async function startGpio(page: Page) {
+  await page.locator('.direct-gpio-actions button.primary').click()
+  await expect(page.locator('.gpio-current-reading')).toContainText('电平')
 }

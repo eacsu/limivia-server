@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test'
 import AxeBuilder from '@axe-core/playwright'
 import { readFileSync } from 'node:fs'
-import { reset, connect, acquire, openResource } from './helpers'
+import { reset, connect, ready, openResource } from './helpers'
 import { kindNames } from '../src/device'
 const fixture = JSON.parse(readFileSync('../../tests/capabilities-v3.json', 'utf8')) as {
   profiles: Record<string, Record<string, { items: unknown[] }>>
@@ -17,9 +17,15 @@ for (const [kind, profile] of kinds)
   test(`能力表单 · ${kind}`, async ({ page }) => {
     await reset(page)
     await connect(page, profile)
-    await acquire(page)
+    await ready(page)
     await openResource(page, kindNames[kind] ?? kind)
-    await expect(page.getByLabel('接线组名称', { exact: true })).toBeVisible()
+    const nameField = page.getByLabel('接线组名称', { exact: true })
+    if (!(await nameField.isVisible())) await page.locator('.wiring-notes > summary').click()
+    await expect(nameField).toBeVisible()
+    if (kind === 'gpio') {
+      await expect(page.locator('.direct-gpio-actions button.primary')).toBeEnabled()
+      return
+    }
     await expect(page.getByRole('button', { name: '应用本组', exact: true })).toBeDisabled()
     await expect(page.getByText('先保存方案，再检查并应用本组。')).toBeVisible()
   })
@@ -57,7 +63,7 @@ for (const theme of ['vallum', 'abyssus'])
   test(`工作页面表单可访问性 · ${theme}`, async ({ page }) => {
     await reset(page)
     await connect(page, 'iot')
-    await acquire(page)
+    await ready(page)
     if (theme === 'abyssus') await page.getByRole('button', { name: '切换苍渊' }).click()
     for (const title of ['设备工作台', '离线流程', '板上文件', '联网通信', '设备维护']) {
       await page.getByRole('navigation').getByRole('button', { name: title, exact: true }).click()

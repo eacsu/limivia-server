@@ -51,7 +51,7 @@ def create_app(
             "name": "LIMIVIA",
             "version": "0.1.0",
             "protocol": 3,
-            "contract": "limivia-v3-jsonrpc2",
+            "contract": "limivia-v3-jsonrpc2-r2",
             "transports": ["ble", "usb", "ws", "mqtt"],
             "device_owner": "backend",
             "default_transport": "ble",
